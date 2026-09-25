@@ -1,18 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-ROBOT DESAIN KONTEN OTOMATIS  (versi 3 — 1080x1350 + gambar aesthetic)
-=====================================================================
-Alur: Notion (Status "Siap Desain") -> ambil gambar Pexels per slide ->
-rakit jadi .pptx bergaya brand -> kirim ke Telegram -> import ke Canva -> edit.
+ROBOT DESAIN KONTEN OTOMATIS  (versi 4 — +output PSD teks-live via Aspose)
+=========================================================================
+Menghasilkan DUA output sekaligus:
+  1. .pptx  -> untuk diedit di Canva (gratis)
+  2. .psd   -> untuk diedit di Photoshop, TEKS MASIH BISA DIKETIK ULANG
+              (pakai library Aspose.PSD — berbayar; mode gratis ada watermark)
 
-Kalau mau ganti tagline/footer/warna/gaya gambar, cukup ubah teks di
-bagian ">>> PENGATURAN BRAND <<<" di bawah ini. Tidak perlu sentuh yang lain.
+Kalau Aspose tidak terpasang / gagal, output .psd otomatis dilewati dan
+.pptx tetap terkirim (jaring pengaman).
+
+Atur output lewat env: OUTPUT_PPTX (default true), OUTPUT_PSD (default true).
+Watermark hilang jika ASPOSE_METERED_PUBLIC & ASPOSE_METERED_PRIVATE diisi.
 """
 
 import os
 import re
 import io
 import random
+import zipfile
 import tempfile
 import traceback
 
@@ -34,21 +40,21 @@ except Exception:
 # ======================================================================
 # >>> PENGATURAN BRAND (boleh kamu ubah sesukamu) <<<
 # ======================================================================
-BRAND_TAGLINE = os.environ.get("BRAND_TAGLINE") or "Balancing Your Love"     # kanan atas
-FOOTER_TEXT   = os.environ.get("FOOTER_TEXT")   or "nikahinstitute.com  |  Kelas & Konseling Pranikah"  # kiri bawah
-CTA_TEXT      = os.environ.get("CTA_TEXT")      or "GESER \u2192"            # tombol kanan bawah (khusus carousel)
-ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "7C3AED").lstrip("#")     # warna aksen (hex tanpa #)
-LOGO_URL      = os.environ.get("LOGO_URL")      or ""                        # URL logo PNG transparan (opsional)
+BRAND_TAGLINE = os.environ.get("BRAND_TAGLINE") or "Balancing Your Love"
+FOOTER_TEXT   = os.environ.get("FOOTER_TEXT")   or "nikahinstitute.com  |  Kelas & Konseling Pranikah"
+CTA_TEXT      = os.environ.get("CTA_TEXT")      or "GESER \u2192"
+ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "7C3AED").lstrip("#")
+LOGO_URL      = os.environ.get("LOGO_URL")      or ""
 HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Poppins"
 BODY_FONT     = os.environ.get("BODY_FONT")     or "Poppins"
-
-# Pengarah gaya gambar: kata ini otomatis ditambahkan ke pencarian Pexels
-# supaya hasilnya lebih aesthetic/editorial, bukan stok promosi yang kaku.
 STYLE_HINT    = os.environ.get("STYLE_HINT")    or "aesthetic candid cinematic natural light"
 
-# Ukuran kanvas (px). Default 1080x1350 (portrait 4:5, feed IG).
 CANVAS_W = int(os.environ.get("CANVAS_W") or 1080)
 CANVAS_H = int(os.environ.get("CANVAS_H") or 1350)
+
+# Output mana yang dibuat
+OUTPUT_PPTX = (os.environ.get("OUTPUT_PPTX") or "true").lower() == "true"
+OUTPUT_PSD  = (os.environ.get("OUTPUT_PSD")  or "true").lower() == "true"
 
 
 # ======================================================================
@@ -77,7 +83,6 @@ STATUS_DONE  = env("STATUS_DONE",  "Terkirim")
 STATUS_ERROR = env("STATUS_ERROR", "Gagal")
 STATUS_TYPE  = env("STATUS_TYPE", "select").strip().lower()
 
-# Orientasi Pexels: portrait kalau kanvas lebih tinggi dari lebar, selain itu square
 PEXELS_ORIENTATION = "portrait" if CANVAS_H > CANVAS_W else "square"
 
 def hex_rgb(h):
@@ -87,11 +92,35 @@ def hex_rgb(h):
 ACCENT = hex_rgb(ACCENT_COLOR)
 WHITE  = RGBColor(0xFF, 0xFF, 0xFF)
 
-# Konversi px -> EMU (1 px @96dpi = 9525 EMU)
 EMU_W = CANVAS_W * 9525
 EMU_H = CANVAS_H * 9525
-def fx(f): return Emu(int(f * EMU_W))   # posisi/lebar (arah horizontal)
-def fy(f): return Emu(int(f * EMU_H))   # posisi/tinggi (arah vertikal)
+def fx(f): return Emu(int(f * EMU_W))
+def fy(f): return Emu(int(f * EMU_H))
+
+
+# ======================================================================
+# 1b. ASPOSE (untuk PSD). Diimpor dengan aman — kalau gagal, PSD dilewati.
+# ======================================================================
+ASPOSE_OK = False
+if OUTPUT_PSD:
+    try:
+        from aspose.psd import Image as AsImage, Rectangle as AsRect, Color as AsColor
+        from aspose.psd.fileformats.psd import PsdImage
+        from aspose.psd.fileformats.psd.layers import Layer as PsdLayer
+        ASPOSE_OK = True
+    except Exception as _e:
+        print("  ! Aspose.PSD tidak tersedia, output PSD dilewati:", _e)
+
+def apply_aspose_license():
+    pub = os.environ.get("ASPOSE_METERED_PUBLIC", "")
+    priv = os.environ.get("ASPOSE_METERED_PRIVATE", "")
+    if ASPOSE_OK and pub and priv:
+        try:
+            from aspose.psd import Metered
+            Metered().set_metered_key(pub, priv)
+            print("  Aspose: metered license aktif (tanpa watermark).")
+        except Exception as e:
+            print("  ! Gagal set metered license:", e)
 
 
 # ======================================================================
@@ -183,9 +212,12 @@ def parse_highlights(text):
             out.append((part, False))
     return out
 
+def strip_marks(text):
+    return text.replace("==", "")
+
 
 # ======================================================================
-# 4. GAMBAR PEXELS (dibuat lebih aesthetic)
+# 4. GAMBAR PEXELS
 # ======================================================================
 def pexels_pick(query):
     def _search(q):
@@ -194,7 +226,6 @@ def pexels_pick(query):
                          params={"query": q, "per_page": 10, "orientation": PEXELS_ORIENTATION}, timeout=60)
         r.raise_for_status()
         return r.json().get("photos", [])
-    # 1) coba kata kunci + pengarah gaya  2) kata kunci polos  3) cadangan generik
     photos = _search(f"{query} {STYLE_HINT}".strip()) or _search(query) or _search("aesthetic minimal calm")
     if not photos:
         return None, None
@@ -203,22 +234,21 @@ def pexels_pick(query):
     return requests.get(img_url, timeout=60).content, f'Foto: {photo.get("photographer", "-")} (Pexels)'
 
 def prepare_image(img_bytes, out_path):
-    """Potong ke rasio kanvas + gelapkan atas (logo) & bawah (teks)."""
     im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     target = CANVAS_W / CANVAS_H
     w, h = im.size
-    if w / h > target:                       # terlalu lebar -> potong sisi kiri-kanan
+    if w / h > target:
         nw = int(h * target); x = (w - nw) // 2; im = im.crop((x, 0, x + nw, h))
-    else:                                    # terlalu tinggi -> potong atas-bawah
+    else:
         nh = int(w / target); y = (h - nh) // 2; im = im.crop((0, y, w, y + nh))
     im = im.resize((CANVAS_W, CANVAS_H), Image.LANCZOS)
 
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    top_h = int(CANVAS_H * 0.16)             # scrim atas tipis
+    top_h = int(CANVAS_H * 0.16)
     for y in range(0, top_h):
         draw.line([(0, y), (CANVAS_W, y)], fill=(0, 0, 0, int(120 * (1 - y / top_h))))
-    start = int(CANVAS_H * 0.42)             # gradasi bawah tebal
+    start = int(CANVAS_H * 0.42)
     for y in range(start, CANVAS_H):
         draw.line([(0, y), (CANVAS_W, y)], fill=(0, 0, 0, int(230 * (y - start) / (CANVAS_H - start))))
     Image.alpha_composite(im.convert("RGBA"), overlay).convert("RGB").save(out_path, "PNG")
@@ -226,7 +256,7 @@ def prepare_image(img_bytes, out_path):
 
 
 # ======================================================================
-# 5. RAKIT .PPTX BERGAYA BRAND
+# 5a. RAKIT .PPTX (untuk Canva)
 # ======================================================================
 def text_box(slide, left, top, width, height, text, size_pt,
              bold=False, font=None, align=PP_ALIGN.LEFT, color=None, highlight=False):
@@ -293,7 +323,6 @@ def build_pptx(slides_data, out_path):
     for s in slides_data:
         slide = prs.slides.add_slide(blank)
         slide.shapes.add_picture(s["image_path"], 0, 0, width=prs.slide_width, height=prs.slide_height)
-
         if logo_path:
             try:
                 slide.shapes.add_picture(logo_path, fx(0.06), fy(0.045), height=fy(0.045))
@@ -315,6 +344,43 @@ def build_pptx(slides_data, out_path):
 
 
 # ======================================================================
+# 5b. RAKIT .PSD (untuk Photoshop, teks bisa diketik ulang) — EKSPERIMENTAL
+# ======================================================================
+def _psd_add_text(psd, text, x, y, w, h, size):
+    if not text:
+        return
+    rect = AsRect(int(x * CANVAS_W), int(y * CANVAS_H), int(w * CANVAS_W), int(h * CANVAS_H))
+    tl = psd.add_text_layer(strip_marks(text.replace("\n", " ")), rect)
+    try:
+        td = tl.text_data
+        for portion in td.items:
+            portion.style.font_size = float(size)
+            portion.style.fill_color = AsColor.white
+        td.update_layer_data()
+    except Exception as te:
+        print("    (gaya teks PSD dilewati:", te, ")")
+
+def build_psd_files(slides_data, workdir):
+    if not ASPOSE_OK:
+        return []
+    apply_aspose_license()
+    paths = []
+    for s in slides_data:
+        try:
+            psd = PsdImage(CANVAS_W, CANVAS_H)
+            with AsImage.load(s["image_path"]) as bg:
+                psd.add_layer(PsdLayer(bg))               # layer background (bisa diganti gambarnya)
+            _psd_add_text(psd, s["headline"], 0.07, 0.52, 0.86, 0.17, 52)
+            _psd_add_text(psd, s["body"],     0.07, 0.70, 0.86, 0.19, 30)
+            out = os.path.join(workdir, f'slide_{s["index"]}.psd')
+            psd.save(out)
+            paths.append(out)
+        except Exception as e:
+            print("    ! PSD slide gagal:", e)
+    return paths
+
+
+# ======================================================================
 # 6. TELEGRAM
 # ======================================================================
 TG_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
@@ -333,7 +399,7 @@ def tg_document(path, caption=""):
     with open(path, "rb") as f:
         requests.post(f"{TG_BASE}/sendDocument",
                       data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
-                      files={"document": f}, timeout=120)
+                      files={"document": f}, timeout=180)
 
 
 # ======================================================================
@@ -373,9 +439,8 @@ def process_page(page, workdir):
                             "image_path": img_path, "index": i, "total": total})
 
     safe_name = re.sub(r"[^\w\- ]", "", title).strip().replace(" ", "_")[:40] or "desain"
-    pptx_path = os.path.join(workdir, f"{safe_name}.pptx")
-    build_pptx(slides_data, pptx_path)
 
+    # ringkasan caption
     caption_lines = [f"🎨 {title}  ({fmt}, {total} slide)", ""]
     for i, s in enumerate(slides_data, start=1):
         h = s["headline"] or "(tanpa judul)"
@@ -383,13 +448,34 @@ def process_page(page, workdir):
         caption_lines.append(f"— Slide {i}: {h}")
         if b:
             caption_lines.append(f"  {b}")
-    caption_lines += ["", *credits, "",
-                      "➡️ Buka Canva → Upload → pilih file .pptx ini → tiap slide jadi halaman yang bisa diedit."]
+    caption_lines += ["", *credits]
     tg_message("\n".join(caption_lines))
 
+    # preview gambar
     for i, p in enumerate(preview_paths, start=1):
         tg_photo(p, caption=f"Preview slide {i}/{total}")
-    tg_document(pptx_path, caption=f"{title} — import file ini ke Canva ✨")
+
+    # OUTPUT 1: pptx (Canva)
+    if OUTPUT_PPTX:
+        pptx_path = os.path.join(workdir, f"{safe_name}.pptx")
+        build_pptx(slides_data, pptx_path)
+        tg_document(pptx_path, caption=f"{title} — .pptx: import ke Canva ✨")
+
+    # OUTPUT 2: psd (Photoshop)
+    if OUTPUT_PSD:
+        psd_paths = build_psd_files(slides_data, workdir)
+        if psd_paths:
+            if len(psd_paths) == 1:
+                tg_document(psd_paths[0], caption=f"{title} — .psd: buka di Photoshop (teks bisa diedit)")
+            else:
+                zip_path = os.path.join(workdir, f"{safe_name}_psd.zip")
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+                    for p in psd_paths:
+                        z.write(p, os.path.basename(p))
+                tg_document(zip_path, caption=f"{title} — {len(psd_paths)} file .psd (Photoshop, teks bisa diedit)")
+        elif ASPOSE_OK:
+            tg_message("ℹ️ PSD gagal dibuat untuk konten ini (cek log GitHub Actions).")
+
     return total
 
 
@@ -397,7 +483,7 @@ def process_page(page, workdir):
 # 8. MAIN
 # ======================================================================
 def main():
-    print(f"== Robot Desain Konten (v3, {CANVAS_W}x{CANVAS_H}): cek Notion ==")
+    print(f"== Robot Desain Konten (v4, {CANVAS_W}x{CANVAS_H}) | pptx={OUTPUT_PPTX} psd={OUTPUT_PSD and ASPOSE_OK} ==")
     pages = notion_find_ready()
     print(f"Ditemukan {len(pages)} konten berstatus '{STATUS_READY}'.")
     if not pages:
