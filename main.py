@@ -1,16 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-ROBOT DESAIN KONTEN OTOMATIS
-============================
-Alur kerja:
-1. Cek Notion: cari baris konten yang Status-nya = "Siap Desain".
-2. Untuk tiap konten: baca isinya per slide, ambil gambar dari Pexels sesuai konteks.
-3. Rakit jadi file PowerPoint (.pptx) -> nanti tinggal di-import ke Canva (gratis, bisa diedit).
-4. Kirim hasilnya ke Telegram (preview gambar + file .pptx + teks caption).
-5. Ubah Status di Notion jadi "Terkirim" biar nggak diproses dua kali.
+ROBOT DESAIN KONTEN OTOMATIS  (versi 2 — gaya brand)
+====================================================
+Alur: Notion (Status "Siap Desain") -> ambil gambar Pexels per slide ->
+rakit jadi .pptx bergaya brand -> kirim ke Telegram -> import ke Canva -> edit.
 
-Kamu TIDAK perlu mengedit file ini. Semua pengaturan lewat "environment variables"
-(dijelaskan di README). Kalau nama kolom Notion kamu beda, cukup ubah lewat env, bukan di sini.
+Kamu TIDAK perlu bisa coding. Kalau mau ganti tagline/footer/warna,
+cukup ubah teks di bagian ">>> PENGATURAN BRAND <<<" di bawah ini.
 """
 
 import os
@@ -25,10 +21,9 @@ from PIL import Image, ImageDraw
 from pptx import Presentation
 from pptx.util import Emu, Pt
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.shapes import MSO_SHAPE
 
-# Buat testing di laptop: kalau ada file .env, muat otomatis.
-# Di server (GitHub Actions/Railway) bagian ini diabaikan dengan aman.
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -37,7 +32,20 @@ except Exception:
 
 
 # ======================================================================
-# 1. PENGATURAN (diambil dari environment variables)
+# >>> PENGATURAN BRAND (boleh kamu ubah sesukamu) <<<
+# Ganti teks di dalam tanda kutip. Kosongkan jadi "" kalau tidak mau dipakai.
+# ======================================================================
+BRAND_TAGLINE = os.environ.get("BRAND_TAGLINE") or "Balancing Your Love"     # kanan atas
+FOOTER_TEXT   = os.environ.get("FOOTER_TEXT")   or "nikahinstitute.com  |  Kelas & Konseling Pranikah"  # kiri bawah
+CTA_TEXT      = os.environ.get("CTA_TEXT")      or "GESER \u2192"            # tombol kanan bawah (khusus carousel)
+ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "7C3AED").lstrip("#")     # warna aksen (hex tanpa #). Ungu.
+LOGO_URL      = os.environ.get("LOGO_URL")      or ""                        # URL logo PNG transparan (opsional)
+HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Poppins"
+BODY_FONT     = os.environ.get("BODY_FONT")     or "Poppins"
+
+
+# ======================================================================
+# 1. PENGATURAN TEKNIS (dari environment variables / Secrets)
 # ======================================================================
 def env(name, default=None, required=False):
     val = os.environ.get(name, default)
@@ -45,29 +53,31 @@ def env(name, default=None, required=False):
         raise SystemExit(f"[SETUP ERROR] Environment variable '{name}' belum diisi. Cek README.")
     return val
 
-# Kunci-kunci (wajib)
 NOTION_TOKEN        = env("NOTION_TOKEN", required=True)
 NOTION_DATABASE_ID  = env("NOTION_DATABASE_ID", required=True)
 PEXELS_API_KEY      = env("PEXELS_API_KEY", required=True)
 TELEGRAM_BOT_TOKEN  = env("TELEGRAM_BOT_TOKEN", required=True)
 TELEGRAM_CHAT_ID    = env("TELEGRAM_CHAT_ID", required=True)
 
-# Nama kolom di Notion (kalau punyamu beda, ubah lewat env — default ini sesuai README)
 TITLE_PROPERTY   = env("TITLE_PROPERTY", "Judul")
 STATUS_PROPERTY  = env("STATUS_PROPERTY", "Status")
 FORMAT_PROPERTY  = env("FORMAT_PROPERTY", "Format")
 CONTENT_PROPERTY = env("CONTENT_PROPERTY", "Konten")
 KEYWORD_PROPERTY = env("KEYWORD_PROPERTY", "Kata Kunci Gambar")
 
-# Nilai status
-STATUS_READY = env("STATUS_READY", "Siap Desain")   # pemicu / trigger
-STATUS_DONE  = env("STATUS_DONE",  "Terkirim")       # setelah sukses
-STATUS_ERROR = env("STATUS_ERROR", "Gagal")          # kalau ada error
+STATUS_READY = env("STATUS_READY", "Siap Desain")
+STATUS_DONE  = env("STATUS_DONE",  "Terkirim")
+STATUS_ERROR = env("STATUS_ERROR", "Gagal")
+STATUS_TYPE  = env("STATUS_TYPE", "select").strip().lower()
 
-# Tipe properti Status: "select" (default) atau "status" (kalau kamu pakai tipe Status bawaan Notion)
-STATUS_TYPE = env("STATUS_TYPE", "select").strip().lower()
+SLIDE_PX = 1080
 
-SLIDE_PX = 1080  # ukuran kotak Instagram (1080x1080)
+def hex_rgb(h):
+    h = h.lstrip("#")
+    return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+ACCENT = hex_rgb(ACCENT_COLOR)
+WHITE  = RGBColor(0xFF, 0xFF, 0xFF)
 
 
 # ======================================================================
@@ -81,7 +91,6 @@ NOTION_HEADERS = {
 }
 
 def notion_find_ready():
-    """Cari semua baris yang Status = STATUS_READY."""
     url = f"{NOTION_BASE}/databases/{NOTION_DATABASE_ID}/query"
     if STATUS_TYPE == "status":
         flt = {"property": STATUS_PROPERTY, "status": {"equals": STATUS_READY}}
@@ -93,7 +102,6 @@ def notion_find_ready():
     return resp.json().get("results", [])
 
 def notion_set_status(page_id, status_value, note=None):
-    """Ubah Status sebuah baris (dan tulis catatan kalau ada kolom 'Catatan')."""
     url = f"{NOTION_BASE}/pages/{page_id}"
     if STATUS_TYPE == "status":
         props = {STATUS_PROPERTY: {"status": {"name": status_value}}}
@@ -102,8 +110,6 @@ def notion_set_status(page_id, status_value, note=None):
     props_with_note = dict(props)
     if note:
         props_with_note["Catatan"] = {"rich_text": [{"text": {"content": note[:1900]}}]}
-    # Coba update lengkap dengan catatan. Kalau kolom 'Catatan' tidak ada (patch gagal),
-    # ulangi TANPA catatan supaya status tetap berubah (biar tidak diproses berulang).
     r = requests.patch(url, headers=NOTION_HEADERS, json={"properties": props_with_note}, timeout=60)
     if r.status_code != 200 and note:
         requests.patch(url, headers=NOTION_HEADERS, json={"properties": props}, timeout=60)
@@ -112,7 +118,6 @@ def _plain_text(rich_list):
     return "".join(part.get("plain_text", "") for part in (rich_list or []))
 
 def read_property(props, name, kind):
-    """Ambil isi sebuah kolom Notion dengan aman (kalau tidak ada -> string kosong)."""
     p = props.get(name)
     if not p:
         return ""
@@ -121,35 +126,28 @@ def read_property(props, name, kind):
     if kind == "rich_text":
         return _plain_text(p.get("rich_text", [])).strip()
     if kind == "select":
-        sel = p.get("select")
-        return (sel or {}).get("name", "").strip()
+        return (p.get("select") or {}).get("name", "").strip()
     if kind == "status":
-        sel = p.get("status")
-        return (sel or {}).get("name", "").strip()
+        return (p.get("status") or {}).get("name", "").strip()
     return ""
 
 
 # ======================================================================
-# 3. PARSING ISI KONTEN JADI SLIDE
+# 3. PARSING ISI KONTEN
 # ======================================================================
 def split_slides(content_text):
-    """Pisah konten jadi beberapa slide. Pemisah antar slide = baris berisi '---'."""
     raw = (content_text or "").replace("\r\n", "\n").replace("\r", "\n")
     blocks = re.split(r"(?m)^\s*---\s*$", raw)
     return [b.strip() for b in blocks if b.strip()]
 
 def headline_and_body(block):
-    """Baris pertama = judul besar (headline), sisanya = isi (body)."""
     lines = block.split("\n")
     idx = next((i for i, l in enumerate(lines) if l.strip()), None)
     if idx is None:
         return "", ""
-    headline = lines[idx].strip()
-    body = "\n".join(lines[idx + 1:]).strip()
-    return headline, body
+    return lines[idx].strip(), "\n".join(lines[idx + 1:]).strip()
 
 def keyword_for(index, keyword_blocks, headline, body):
-    """Tentukan kata kunci gambar untuk sebuah slide."""
     if index < len(keyword_blocks) and keyword_blocks[index].strip():
         q = keyword_blocks[index].strip()
     elif headline:
@@ -158,40 +156,40 @@ def keyword_for(index, keyword_blocks, headline, body):
         q = body
     else:
         q = "aesthetic minimal background"
-    # ambil maksimal 5 kata pertama biar hasil Pexels lebih relevan
+    q = re.sub(r"==", "", q)  # buang tanda highlight kalau ada
     words = re.sub(r"[^\w\s]", " ", q).split()
     return " ".join(words[:5]) if words else "aesthetic minimal background"
 
+def parse_highlights(text):
+    """Pecah teks jadi potongan biasa & potongan highlight (ditandai ==begini==)."""
+    out = []
+    for part in re.split(r"(==.+?==)", text):
+        if len(part) >= 4 and part.startswith("==") and part.endswith("=="):
+            out.append((part[2:-2], True))
+        elif part != "":
+            out.append((part, False))
+    return out
+
 
 # ======================================================================
-# 4. AMBIL & OLAH GAMBAR PEXELS
+# 4. GAMBAR PEXELS
 # ======================================================================
 def pexels_pick(query):
-    """Cari gambar di Pexels, kembalikan (bytes_gambar, kredit_teks)."""
     def _search(q):
-        r = requests.get(
-            "https://api.pexels.com/v1/search",
-            headers={"Authorization": PEXELS_API_KEY},
-            params={"query": q, "per_page": 8, "orientation": "square"},
-            timeout=60,
-        )
+        r = requests.get("https://api.pexels.com/v1/search",
+                         headers={"Authorization": PEXELS_API_KEY},
+                         params={"query": q, "per_page": 8, "orientation": "square"}, timeout=60)
         r.raise_for_status()
         return r.json().get("photos", [])
-
-    photos = _search(query)
-    if not photos:  # cadangan kalau kata kuncinya terlalu spesifik
-        photos = _search("calm minimal aesthetic")
+    photos = _search(query) or _search("calm minimal aesthetic")
     if not photos:
         return None, None
-
-    photo = random.choice(photos[:5])  # variasi biar tidak monoton
+    photo = random.choice(photos[:5])
     img_url = photo["src"].get("large2x") or photo["src"].get("large") or photo["src"]["original"]
-    img_bytes = requests.get(img_url, timeout=60).content
-    credit = f'Foto: {photo.get("photographer", "-")} (Pexels)'
-    return img_bytes, credit
+    return requests.get(img_url, timeout=60).content, f'Foto: {photo.get("photographer", "-")} (Pexels)'
 
 def prepare_image(img_bytes, out_path):
-    """Potong jadi kotak 1080x1080 + kasih gradasi gelap di bawah biar teks terbaca."""
+    """Potong kotak 1080 + gelapkan atas (buat logo) & bawah (buat teks)."""
     im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     w, h = im.size
     m = min(w, h)
@@ -200,24 +198,31 @@ def prepare_image(img_bytes, out_path):
 
     overlay = Image.new("RGBA", (SLIDE_PX, SLIDE_PX), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    start = int(SLIDE_PX * 0.32)
-    for y in range(start, SLIDE_PX):
-        a = int(215 * (y - start) / (SLIDE_PX - start))
+    # scrim atas (tipis) biar logo/tagline kebaca
+    top_h = int(SLIDE_PX * 0.20)
+    for y in range(0, top_h):
+        a = int(120 * (1 - y / top_h))
         draw.line([(0, y), (SLIDE_PX, y)], fill=(0, 0, 0, a))
-    im = Image.alpha_composite(im.convert("RGBA"), overlay).convert("RGB")
-    im.save(out_path, "PNG")
+    # gradasi bawah (tebal) biar teks utama kebaca
+    start = int(SLIDE_PX * 0.34)
+    for y in range(start, SLIDE_PX):
+        a = int(225 * (y - start) / (SLIDE_PX - start))
+        draw.line([(0, y), (SLIDE_PX, y)], fill=(0, 0, 0, a))
+    Image.alpha_composite(im.convert("RGBA"), overlay).convert("RGB").save(out_path, "PNG")
     return out_path
 
 
 # ======================================================================
-# 5. RAKIT FILE .PPTX
+# 5. RAKIT .PPTX BERGAYA BRAND
 # ======================================================================
 def frac(f):
-    """Konversi pecahan (0-1) ke satuan EMU untuk kanvas 1080px."""
-    return Emu(int(f * 10287000))  # 1080px ~ 11.25 inci ~ 10.287.000 EMU
+    return Emu(int(f * 10287000))  # 1080px ~ 11.25 inci
 
-def add_textbox(slide, text, top_frac, height_frac, size_pt, bold, align=PP_ALIGN.LEFT):
-    box = slide.shapes.add_textbox(frac(0.07), top_frac, frac(0.86), height_frac)
+def text_box(slide, left, top, width, height, text, size_pt,
+             bold=False, font=None, align=PP_ALIGN.LEFT, color=None, highlight=False):
+    font = font or BODY_FONT
+    color = color or WHITE
+    box = slide.shapes.add_textbox(frac(left), frac(top), frac(width), frac(height))
     tf = box.text_frame
     tf.word_wrap = True
     first = True
@@ -225,38 +230,85 @@ def add_textbox(slide, text, top_frac, height_frac, size_pt, bold, align=PP_ALIG
         p = tf.paragraphs[0] if first else tf.add_paragraph()
         first = False
         p.alignment = align
-        run = p.add_run()
-        run.text = line
-        f = run.font
-        f.size = Pt(size_pt)
-        f.bold = bold
-        f.name = "Poppins"
-        f.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        segs = parse_highlights(line) if highlight else [(line, False)]
+        for seg, is_hl in (segs or [("", False)]):
+            run = p.add_run()
+            run.text = seg
+            f = run.font
+            f.size = Pt(size_pt)
+            f.bold = bold or is_hl
+            f.name = font
+            f.color.rgb = ACCENT if is_hl else color
     return box
 
+def add_cta(slide):
+    shp = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, frac(0.66), frac(0.895), frac(0.28), frac(0.062))
+    shp.fill.solid()
+    shp.fill.fore_color.rgb = WHITE
+    shp.line.fill.background()
+    shp.shadow.inherit = False
+    tf = shp.text_frame
+    tf.word_wrap = False
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    tf.margin_top = 0
+    tf.margin_bottom = 0
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.CENTER
+    run = p.add_run()
+    run.text = CTA_TEXT
+    f = run.font
+    f.size = Pt(15)
+    f.bold = True
+    f.name = BODY_FONT
+    f.color.rgb = ACCENT
+
+def download_logo():
+    if not LOGO_URL:
+        return None
+    try:
+        data = requests.get(LOGO_URL, timeout=30).content
+        path = os.path.join(tempfile.gettempdir(), f"logo_{random.randint(1, 999999)}.png")
+        with open(path, "wb") as fp:
+            fp.write(data)
+        Image.open(path).verify()
+        return path
+    except Exception as e:
+        print("  ! logo gagal diambil:", e)
+        return None
+
 def build_pptx(slides_data, out_path):
-    """slides_data = list of dict {headline, body, image_path, index, total}."""
     prs = Presentation()
     prs.slide_width = frac(1.0)
     prs.slide_height = frac(1.0)
     blank = prs.slide_layouts[6]
+    logo_path = download_logo()
 
     for s in slides_data:
         slide = prs.slides.add_slide(blank)
         slide.shapes.add_picture(s["image_path"], 0, 0, width=prs.slide_width, height=prs.slide_height)
-        if s["total"] > 1:  # nomor slide untuk carousel
-            add_textbox(slide, f'{s["index"]}/{s["total"]}', frac(0.05), frac(0.08), 18, True, PP_ALIGN.RIGHT)
+
+        if logo_path:
+            try:
+                slide.shapes.add_picture(logo_path, frac(0.06), frac(0.05), height=frac(0.06))
+            except Exception:
+                pass
+        if BRAND_TAGLINE:
+            text_box(slide, 0.52, 0.05, 0.42, 0.10, BRAND_TAGLINE, 14, bold=True, align=PP_ALIGN.RIGHT)
         if s["headline"]:
-            add_textbox(slide, s["headline"], frac(0.50), frac(0.20), 38, True)
+            text_box(slide, 0.07, 0.43, 0.86, 0.22, s["headline"], 38, bold=True, font=HEADLINE_FONT, highlight=True)
         if s["body"]:
-            add_textbox(slide, s["body"], frac(0.70), frac(0.25), 22, False)
+            text_box(slide, 0.07, 0.65, 0.86, 0.24, s["body"], 21, bold=False, font=BODY_FONT, highlight=True)
+        if FOOTER_TEXT:
+            text_box(slide, 0.06, 0.905, 0.58, 0.08, FOOTER_TEXT, 11, bold=False, align=PP_ALIGN.LEFT)
+        if s["total"] > 1 and CTA_TEXT:
+            add_cta(slide)
 
     prs.save(out_path)
     return out_path
 
 
 # ======================================================================
-# 6. KIRIM KE TELEGRAM
+# 6. TELEGRAM
 # ======================================================================
 TG_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
@@ -292,8 +344,7 @@ def process_page(page, workdir):
 
     slide_blocks = split_slides(content)
     if "single" in fmt.lower():
-        slide_blocks = slide_blocks[:1]  # single post = 1 slide saja
-
+        slide_blocks = slide_blocks[:1]
     keyword_blocks = split_slides(keywords)
 
     print(f"  -> '{title}' | {fmt} | {len(slide_blocks)} slide")
@@ -311,17 +362,13 @@ def process_page(page, workdir):
         preview_paths.append(img_path)
         if credit:
             credits.append(f"Slide {i}: {credit}")
-        slides_data.append({
-            "headline": headline, "body": body,
-            "image_path": img_path, "index": i, "total": total,
-        })
+        slides_data.append({"headline": headline, "body": body,
+                            "image_path": img_path, "index": i, "total": total})
 
-    # rakit pptx
     safe_name = re.sub(r"[^\w\- ]", "", title).strip().replace(" ", "_")[:40] or "desain"
     pptx_path = os.path.join(workdir, f"{safe_name}.pptx")
     build_pptx(slides_data, pptx_path)
 
-    # ringkasan caption untuk kamu copy
     caption_lines = [f"🎨 {title}  ({fmt}, {total} slide)", ""]
     for i, s in enumerate(slides_data, start=1):
         h = s["headline"] or "(tanpa judul)"
@@ -329,24 +376,21 @@ def process_page(page, workdir):
         caption_lines.append(f"— Slide {i}: {h}")
         if b:
             caption_lines.append(f"  {b}")
-    caption_lines += ["", *credits, "", "➡️ Cara pakai: buka Canva → Upload → pilih file .pptx ini → tiap slide otomatis jadi halaman yang bisa diedit."]
+    caption_lines += ["", *credits, "",
+                      "➡️ Buka Canva → Upload → pilih file .pptx ini → tiap slide jadi halaman yang bisa diedit."]
     tg_message("\n".join(caption_lines))
 
-    # kirim preview gambar (biar bisa dilihat langsung di HP)
     for i, p in enumerate(preview_paths, start=1):
         tg_photo(p, caption=f"Preview slide {i}/{total}")
-
-    # kirim file .pptx (yang di-import ke Canva)
-    tg_document(pptx_path, caption=f"{title} — import file ini ke Canva untuk mengedit ✨")
-
+    tg_document(pptx_path, caption=f"{title} — import file ini ke Canva ✨")
     return total
 
 
 # ======================================================================
-# 8. MAIN (jalan sekali, lalu selesai)
+# 8. MAIN
 # ======================================================================
 def main():
-    print("== Robot Desain Konten: mulai cek Notion ==")
+    print("== Robot Desain Konten (v2): mulai cek Notion ==")
     pages = notion_find_ready()
     print(f"Ditemukan {len(pages)} konten berstatus '{STATUS_READY}'.")
     if not pages:
@@ -359,7 +403,7 @@ def main():
         try:
             process_page(page, workdir)
             notion_set_status(page_id, STATUS_DONE)
-            print("  ✔ Sukses & status di Notion diubah jadi:", STATUS_DONE)
+            print("  v Sukses & status diubah jadi:", STATUS_DONE)
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             print("  x GAGAL:", err)
