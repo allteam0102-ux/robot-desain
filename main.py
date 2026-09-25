@@ -104,20 +104,33 @@ def fy(f): return Emu(int(f * EMU_H))
 ASPOSE_OK = False
 if OUTPUT_PSD:
     try:
-        from aspose.psd import Image as AsImage, Rectangle as AsRect, Color as AsColor
+        from aspose.psd import Image as AsImage, Rectangle as AsRect, Color as AsColor, Graphics as AsGraphics
         from aspose.psd.fileformats.psd import PsdImage
         ASPOSE_OK = True
     except Exception as _e:
         print("  ! Aspose.PSD tidak tersedia, output PSD dilewati:", _e)
 
 def apply_aspose_license():
+    if not ASPOSE_OK:
+        return
+    # 1) File license (Temporary / Full) dari ASPOSE_LICENSE_PATH
+    lic_path = os.environ.get("ASPOSE_LICENSE_PATH", "")
+    if lic_path and os.path.exists(lic_path) and os.path.getsize(lic_path) > 0:
+        try:
+            from aspose.psd import License
+            License().set_license(lic_path)
+            print("  Aspose: file license aktif.")
+            return
+        except Exception as e:
+            print("  ! Gagal set file license:", e)
+    # 2) Metered keys (pay-as-you-use)
     pub = os.environ.get("ASPOSE_METERED_PUBLIC", "")
     priv = os.environ.get("ASPOSE_METERED_PRIVATE", "")
-    if ASPOSE_OK and pub and priv:
+    if pub and priv:
         try:
             from aspose.psd import Metered
             Metered().set_metered_key(pub, priv)
-            print("  Aspose: metered license aktif (tanpa watermark).")
+            print("  Aspose: metered license aktif.")
         except Exception as e:
             print("  ! Gagal set metered license:", e)
 
@@ -387,9 +400,9 @@ def build_psd_files(slides_data, workdir):
             # background: bikin layer biasa lalu isi pikselnya dari foto yang sudah diolah
             try:
                 layer = psd.add_regular_layer()
+                g = AsGraphics(layer)
                 with AsImage.load(s["image_path"]) as raster:
-                    pixels = raster.load_argb_32_pixels(raster.bounds)
-                    layer.save_argb_32_pixels(AsRect(0, 0, CANVAS_W, CANVAS_H), pixels)
+                    g.draw_image(raster, AsRect(0, 0, CANVAS_W, CANVAS_H))
             except Exception as be:
                 print("    (background PSD dilewati:", be, ")")
             # teks (jadi layer teks yang bisa diketik ulang di Photoshop)
