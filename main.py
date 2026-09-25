@@ -367,10 +367,10 @@ def _psd_white():
         except Exception:
             return None
 
-def _psd_add_text(psd, text, x, y, w, h, size):
+def _psd_add_text(psd, text, x, y, w, h, size, x_off=0):
     if not text:
         return
-    rect = AsRect(int(x * CANVAS_W), int(y * CANVAS_H), int(w * CANVAS_W), int(h * CANVAS_H))
+    rect = AsRect(int(x * CANVAS_W) + x_off, int(y * CANVAS_H), int(w * CANVAS_W), int(h * CANVAS_H))
     tl = psd.add_text_layer(strip_marks(text.replace("\n", " ")), rect)
     try:
         td = tl.text_data
@@ -389,31 +389,35 @@ def _psd_add_text(psd, text, x, y, w, h, size):
     except Exception as te:
         print("    (gaya teks PSD dilewati:", te, ")")
 
-def build_psd_files(slides_data, workdir):
+def build_psd_single(slides_data, workdir, safe_name):
+    """Semua slide dalam SATU file .psd, disusun berjejer kiri->kanan."""
     if not ASPOSE_OK:
-        return []
+        return None
     apply_aspose_license()
-    paths = []
-    for s in slides_data:
-        try:
-            psd = PsdImage(CANVAS_W, CANVAS_H)
-            # background: bikin layer biasa lalu isi pikselnya dari foto yang sudah diolah
+    total = len(slides_data)
+    if total == 0:
+        return None
+    try:
+        psd = PsdImage(CANVAS_W * total, CANVAS_H)   # kanvas lebar = semua slide berjejer
+        for idx, s in enumerate(slides_data):
+            x_off = idx * CANVAS_W
+            # background slide ini (jadi 1 layer)
             try:
                 layer = psd.add_regular_layer()
                 g = AsGraphics(layer)
                 with AsImage.load(s["image_path"]) as raster:
-                    g.draw_image(raster, AsRect(0, 0, CANVAS_W, CANVAS_H))
+                    g.draw_image(raster, AsRect(x_off, 0, CANVAS_W, CANVAS_H))
             except Exception as be:
                 print("    (background PSD dilewati:", be, ")")
-            # teks (jadi layer teks yang bisa diketik ulang di Photoshop)
-            _psd_add_text(psd, s["headline"], 0.07, 0.52, 0.86, 0.17, 52)
-            _psd_add_text(psd, s["body"],     0.07, 0.70, 0.86, 0.19, 30)
-            out = os.path.join(workdir, f'slide_{s["index"]}.psd')
-            psd.save(out)
-            paths.append(out)
-        except Exception as e:
-            print("    ! PSD slide gagal:", e)
-    return paths
+            # teks slide ini (layer teks, bisa diketik ulang di Photoshop)
+            _psd_add_text(psd, s["headline"], 0.07, 0.52, 0.86, 0.17, 52, x_off)
+            _psd_add_text(psd, s["body"],     0.07, 0.70, 0.86, 0.19, 30, x_off)
+        out = os.path.join(workdir, f"{safe_name}.psd")
+        psd.save(out)
+        return out
+    except Exception as e:
+        print("    ! PSD gagal:", e)
+        return None
 
 
 # ======================================================================
@@ -497,18 +501,11 @@ def process_page(page, workdir):
         build_pptx(slides_data, pptx_path)
         tg_document(pptx_path, caption=f"{title} — .pptx: import ke Canva ✨")
 
-    # OUTPUT 2: psd (Photoshop)
+    # OUTPUT 2: psd (Photoshop) — SATU file berisi semua slide berjejer
     if OUTPUT_PSD:
-        psd_paths = build_psd_files(slides_data, workdir)
-        if psd_paths:
-            if len(psd_paths) == 1:
-                tg_document(psd_paths[0], caption=f"{title} — .psd: buka di Photoshop (teks bisa diedit)")
-            else:
-                zip_path = os.path.join(workdir, f"{safe_name}_psd.zip")
-                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-                    for p in psd_paths:
-                        z.write(p, os.path.basename(p))
-                tg_document(zip_path, caption=f"{title} — {len(psd_paths)} file .psd (Photoshop, teks bisa diedit)")
+        psd_path = build_psd_single(slides_data, workdir, safe_name)
+        if psd_path:
+            tg_document(psd_path, caption=f"{title} — .psd 1 file ({total} slide berjejer, teks bisa diedit di Photoshop)")
         elif ASPOSE_OK:
             tg_message("ℹ️ PSD gagal dibuat untuk konten ini (cek log GitHub Actions).")
 
