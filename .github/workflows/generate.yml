@@ -1,15 +1,13 @@
-# File ini HARUS diletakkan di folder: .github/workflows/generate.yml
-# (Di GitHub, saat bikin file baru, ketik nama file persis: .github/workflows/generate.yml
-#  — folder-nya otomatis kebuat.)
-#
-# Fungsinya: menjalankan robot desain otomatis tiap 20 menit, GRATIS.
+# File ini diletakkan di: .github/workflows/generate.yml
+# Menjalankan robot desain otomatis tiap 20 menit, GRATIS.
+# (Versi ini menambahkan .NET untuk output PSD via Aspose.)
 
 name: Robot Desain Konten
 
 on:
   schedule:
-    - cron: "*/20 * * * *"    # jalan tiap 20 menit (waktu UTC). Ubah angkanya kalau mau.
-  workflow_dispatch:           # supaya ada tombol "Run workflow" buat tes manual
+    - cron: "*/20 * * * *"    # tiap 20 menit (UTC)
+  workflow_dispatch:           # tombol "Run workflow" buat tes manual
 
 jobs:
   jalankan:
@@ -24,6 +22,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Siapkan .NET (untuk Aspose/PSD)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0"
+
       - name: Install kebutuhan
         run: pip install -r requirements.txt
 
@@ -35,4 +38,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STATUS_TYPE: ${{ secrets.STATUS_TYPE }}
+          # Kosongkan (jangan bikin secret-nya) untuk mode GRATIS/watermark.
+          # Isi kalau sudah punya metered license Aspose (watermark hilang):
+          ASPOSE_METERED_PUBLIC: ${{ secrets.ASPOSE_METERED_PUBLIC }}
+          ASPOSE_METERED_PRIVATE: ${{ secrets.ASPOSE_METERED_PRIVATE }}
         run: python main.py
