@@ -1,6 +1,6 @@
 # File ini diletakkan di: .github/workflows/generate.yml
 # Menjalankan robot desain otomatis tiap 20 menit, GRATIS.
-# (Versi ini menambahkan .NET untuk output PSD via Aspose.)
+# (Termasuk .NET + pemasangan lisensi Aspose untuk PSD.)
 
 name: Robot Desain Konten
 
@@ -30,6 +30,18 @@ jobs:
       - name: Install kebutuhan
         run: pip install -r requirements.txt
 
+      - name: Pasang lisensi Aspose (kalau ada)
+        env:
+          ASPOSE_LICENSE: ${{ secrets.ASPOSE_LICENSE }}
+        run: |
+          if [ -n "$ASPOSE_LICENSE" ]; then
+            printf '%s' "$ASPOSE_LICENSE" > "$GITHUB_WORKSPACE/Aspose.lic"
+            echo "ASPOSE_LICENSE_PATH=$GITHUB_WORKSPACE/Aspose.lic" >> "$GITHUB_ENV"
+            echo "Lisensi Aspose terpasang."
+          else
+            echo "Tidak ada lisensi Aspose (mode gratis)."
+          fi
+
       - name: Jalankan robot
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
@@ -38,8 +50,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STATUS_TYPE: ${{ secrets.STATUS_TYPE }}
-          # Kosongkan (jangan bikin secret-nya) untuk mode GRATIS/watermark.
-          # Isi kalau sudah punya metered license Aspose (watermark hilang):
           ASPOSE_METERED_PUBLIC: ${{ secrets.ASPOSE_METERED_PUBLIC }}
           ASPOSE_METERED_PRIVATE: ${{ secrets.ASPOSE_METERED_PRIVATE }}
         run: python main.py
