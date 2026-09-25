@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-ROBOT DESAIN KONTEN OTOMATIS  (versi 2 — gaya brand)
-====================================================
+ROBOT DESAIN KONTEN OTOMATIS  (versi 3 — 1080x1350 + gambar aesthetic)
+=====================================================================
 Alur: Notion (Status "Siap Desain") -> ambil gambar Pexels per slide ->
 rakit jadi .pptx bergaya brand -> kirim ke Telegram -> import ke Canva -> edit.
 
-Kamu TIDAK perlu bisa coding. Kalau mau ganti tagline/footer/warna,
-cukup ubah teks di bagian ">>> PENGATURAN BRAND <<<" di bawah ini.
+Kalau mau ganti tagline/footer/warna/gaya gambar, cukup ubah teks di
+bagian ">>> PENGATURAN BRAND <<<" di bawah ini. Tidak perlu sentuh yang lain.
 """
 
 import os
@@ -33,19 +33,26 @@ except Exception:
 
 # ======================================================================
 # >>> PENGATURAN BRAND (boleh kamu ubah sesukamu) <<<
-# Ganti teks di dalam tanda kutip. Kosongkan jadi "" kalau tidak mau dipakai.
 # ======================================================================
 BRAND_TAGLINE = os.environ.get("BRAND_TAGLINE") or "Balancing Your Love"     # kanan atas
 FOOTER_TEXT   = os.environ.get("FOOTER_TEXT")   or "nikahinstitute.com  |  Kelas & Konseling Pranikah"  # kiri bawah
 CTA_TEXT      = os.environ.get("CTA_TEXT")      or "GESER \u2192"            # tombol kanan bawah (khusus carousel)
-ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "7C3AED").lstrip("#")     # warna aksen (hex tanpa #). Ungu.
+ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "7C3AED").lstrip("#")     # warna aksen (hex tanpa #)
 LOGO_URL      = os.environ.get("LOGO_URL")      or ""                        # URL logo PNG transparan (opsional)
 HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Poppins"
 BODY_FONT     = os.environ.get("BODY_FONT")     or "Poppins"
 
+# Pengarah gaya gambar: kata ini otomatis ditambahkan ke pencarian Pexels
+# supaya hasilnya lebih aesthetic/editorial, bukan stok promosi yang kaku.
+STYLE_HINT    = os.environ.get("STYLE_HINT")    or "aesthetic candid cinematic natural light"
+
+# Ukuran kanvas (px). Default 1080x1350 (portrait 4:5, feed IG).
+CANVAS_W = int(os.environ.get("CANVAS_W") or 1080)
+CANVAS_H = int(os.environ.get("CANVAS_H") or 1350)
+
 
 # ======================================================================
-# 1. PENGATURAN TEKNIS (dari environment variables / Secrets)
+# 1. PENGATURAN TEKNIS (dari Secrets)
 # ======================================================================
 def env(name, default=None, required=False):
     val = os.environ.get(name, default)
@@ -70,7 +77,8 @@ STATUS_DONE  = env("STATUS_DONE",  "Terkirim")
 STATUS_ERROR = env("STATUS_ERROR", "Gagal")
 STATUS_TYPE  = env("STATUS_TYPE", "select").strip().lower()
 
-SLIDE_PX = 1080
+# Orientasi Pexels: portrait kalau kanvas lebih tinggi dari lebar, selain itu square
+PEXELS_ORIENTATION = "portrait" if CANVAS_H > CANVAS_W else "square"
 
 def hex_rgb(h):
     h = h.lstrip("#")
@@ -78,6 +86,12 @@ def hex_rgb(h):
 
 ACCENT = hex_rgb(ACCENT_COLOR)
 WHITE  = RGBColor(0xFF, 0xFF, 0xFF)
+
+# Konversi px -> EMU (1 px @96dpi = 9525 EMU)
+EMU_W = CANVAS_W * 9525
+EMU_H = CANVAS_H * 9525
+def fx(f): return Emu(int(f * EMU_W))   # posisi/lebar (arah horizontal)
+def fy(f): return Emu(int(f * EMU_H))   # posisi/tinggi (arah vertikal)
 
 
 # ======================================================================
@@ -155,13 +169,12 @@ def keyword_for(index, keyword_blocks, headline, body):
     elif body:
         q = body
     else:
-        q = "aesthetic minimal background"
-    q = re.sub(r"==", "", q)  # buang tanda highlight kalau ada
+        q = "aesthetic minimal"
+    q = re.sub(r"==", "", q)
     words = re.sub(r"[^\w\s]", " ", q).split()
-    return " ".join(words[:5]) if words else "aesthetic minimal background"
+    return " ".join(words[:4]) if words else "aesthetic minimal"
 
 def parse_highlights(text):
-    """Pecah teks jadi potongan biasa & potongan highlight (ditandai ==begini==)."""
     out = []
     for part in re.split(r"(==.+?==)", text):
         if len(part) >= 4 and part.startswith("==") and part.endswith("=="):
@@ -172,42 +185,42 @@ def parse_highlights(text):
 
 
 # ======================================================================
-# 4. GAMBAR PEXELS
+# 4. GAMBAR PEXELS (dibuat lebih aesthetic)
 # ======================================================================
 def pexels_pick(query):
     def _search(q):
         r = requests.get("https://api.pexels.com/v1/search",
                          headers={"Authorization": PEXELS_API_KEY},
-                         params={"query": q, "per_page": 8, "orientation": "square"}, timeout=60)
+                         params={"query": q, "per_page": 10, "orientation": PEXELS_ORIENTATION}, timeout=60)
         r.raise_for_status()
         return r.json().get("photos", [])
-    photos = _search(query) or _search("calm minimal aesthetic")
+    # 1) coba kata kunci + pengarah gaya  2) kata kunci polos  3) cadangan generik
+    photos = _search(f"{query} {STYLE_HINT}".strip()) or _search(query) or _search("aesthetic minimal calm")
     if not photos:
         return None, None
-    photo = random.choice(photos[:5])
+    photo = random.choice(photos[:6])
     img_url = photo["src"].get("large2x") or photo["src"].get("large") or photo["src"]["original"]
     return requests.get(img_url, timeout=60).content, f'Foto: {photo.get("photographer", "-")} (Pexels)'
 
 def prepare_image(img_bytes, out_path):
-    """Potong kotak 1080 + gelapkan atas (buat logo) & bawah (buat teks)."""
+    """Potong ke rasio kanvas + gelapkan atas (logo) & bawah (teks)."""
     im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    target = CANVAS_W / CANVAS_H
     w, h = im.size
-    m = min(w, h)
-    left, top = (w - m) // 2, (h - m) // 2
-    im = im.crop((left, top, left + m, top + m)).resize((SLIDE_PX, SLIDE_PX), Image.LANCZOS)
+    if w / h > target:                       # terlalu lebar -> potong sisi kiri-kanan
+        nw = int(h * target); x = (w - nw) // 2; im = im.crop((x, 0, x + nw, h))
+    else:                                    # terlalu tinggi -> potong atas-bawah
+        nh = int(w / target); y = (h - nh) // 2; im = im.crop((0, y, w, y + nh))
+    im = im.resize((CANVAS_W, CANVAS_H), Image.LANCZOS)
 
-    overlay = Image.new("RGBA", (SLIDE_PX, SLIDE_PX), (0, 0, 0, 0))
+    overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    # scrim atas (tipis) biar logo/tagline kebaca
-    top_h = int(SLIDE_PX * 0.20)
+    top_h = int(CANVAS_H * 0.16)             # scrim atas tipis
     for y in range(0, top_h):
-        a = int(120 * (1 - y / top_h))
-        draw.line([(0, y), (SLIDE_PX, y)], fill=(0, 0, 0, a))
-    # gradasi bawah (tebal) biar teks utama kebaca
-    start = int(SLIDE_PX * 0.34)
-    for y in range(start, SLIDE_PX):
-        a = int(225 * (y - start) / (SLIDE_PX - start))
-        draw.line([(0, y), (SLIDE_PX, y)], fill=(0, 0, 0, a))
+        draw.line([(0, y), (CANVAS_W, y)], fill=(0, 0, 0, int(120 * (1 - y / top_h))))
+    start = int(CANVAS_H * 0.42)             # gradasi bawah tebal
+    for y in range(start, CANVAS_H):
+        draw.line([(0, y), (CANVAS_W, y)], fill=(0, 0, 0, int(230 * (y - start) / (CANVAS_H - start))))
     Image.alpha_composite(im.convert("RGBA"), overlay).convert("RGB").save(out_path, "PNG")
     return out_path
 
@@ -215,14 +228,11 @@ def prepare_image(img_bytes, out_path):
 # ======================================================================
 # 5. RAKIT .PPTX BERGAYA BRAND
 # ======================================================================
-def frac(f):
-    return Emu(int(f * 10287000))  # 1080px ~ 11.25 inci
-
 def text_box(slide, left, top, width, height, text, size_pt,
              bold=False, font=None, align=PP_ALIGN.LEFT, color=None, highlight=False):
     font = font or BODY_FONT
     color = color or WHITE
-    box = slide.shapes.add_textbox(frac(left), frac(top), frac(width), frac(height))
+    box = slide.shapes.add_textbox(fx(left), fy(top), fx(width), fy(height))
     tf = box.text_frame
     tf.word_wrap = True
     first = True
@@ -242,7 +252,7 @@ def text_box(slide, left, top, width, height, text, size_pt,
     return box
 
 def add_cta(slide):
-    shp = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, frac(0.66), frac(0.895), frac(0.28), frac(0.062))
+    shp = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, fx(0.66), fy(0.915), fx(0.28), fy(0.05))
     shp.fill.solid()
     shp.fill.fore_color.rgb = WHITE
     shp.line.fill.background()
@@ -257,10 +267,7 @@ def add_cta(slide):
     run = p.add_run()
     run.text = CTA_TEXT
     f = run.font
-    f.size = Pt(15)
-    f.bold = True
-    f.name = BODY_FONT
-    f.color.rgb = ACCENT
+    f.size = Pt(15); f.bold = True; f.name = BODY_FONT; f.color.rgb = ACCENT
 
 def download_logo():
     if not LOGO_URL:
@@ -278,8 +285,8 @@ def download_logo():
 
 def build_pptx(slides_data, out_path):
     prs = Presentation()
-    prs.slide_width = frac(1.0)
-    prs.slide_height = frac(1.0)
+    prs.slide_width = Emu(EMU_W)
+    prs.slide_height = Emu(EMU_H)
     blank = prs.slide_layouts[6]
     logo_path = download_logo()
 
@@ -289,17 +296,17 @@ def build_pptx(slides_data, out_path):
 
         if logo_path:
             try:
-                slide.shapes.add_picture(logo_path, frac(0.06), frac(0.05), height=frac(0.06))
+                slide.shapes.add_picture(logo_path, fx(0.06), fy(0.045), height=fy(0.045))
             except Exception:
                 pass
         if BRAND_TAGLINE:
-            text_box(slide, 0.52, 0.05, 0.42, 0.10, BRAND_TAGLINE, 14, bold=True, align=PP_ALIGN.RIGHT)
+            text_box(slide, 0.52, 0.045, 0.42, 0.08, BRAND_TAGLINE, 14, bold=True, align=PP_ALIGN.RIGHT)
         if s["headline"]:
-            text_box(slide, 0.07, 0.43, 0.86, 0.22, s["headline"], 38, bold=True, font=HEADLINE_FONT, highlight=True)
+            text_box(slide, 0.07, 0.52, 0.86, 0.17, s["headline"], 38, bold=True, font=HEADLINE_FONT, highlight=True)
         if s["body"]:
-            text_box(slide, 0.07, 0.65, 0.86, 0.24, s["body"], 21, bold=False, font=BODY_FONT, highlight=True)
+            text_box(slide, 0.07, 0.70, 0.86, 0.19, s["body"], 21, bold=False, font=BODY_FONT, highlight=True)
         if FOOTER_TEXT:
-            text_box(slide, 0.06, 0.905, 0.58, 0.08, FOOTER_TEXT, 11, bold=False, align=PP_ALIGN.LEFT)
+            text_box(slide, 0.06, 0.93, 0.58, 0.055, FOOTER_TEXT, 11, bold=False, align=PP_ALIGN.LEFT)
         if s["total"] > 1 and CTA_TEXT:
             add_cta(slide)
 
@@ -390,7 +397,7 @@ def process_page(page, workdir):
 # 8. MAIN
 # ======================================================================
 def main():
-    print("== Robot Desain Konten (v2): mulai cek Notion ==")
+    print(f"== Robot Desain Konten (v3, {CANVAS_W}x{CANVAS_H}): cek Notion ==")
     pages = notion_find_ready()
     print(f"Ditemukan {len(pages)} konten berstatus '{STATUS_READY}'.")
     if not pages:
