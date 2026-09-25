@@ -1,6 +1,6 @@
 # File ini diletakkan di: .github/workflows/generate.yml
 # Menjalankan robot desain otomatis tiap 20 menit, GRATIS.
-# (Termasuk .NET + pemasangan lisensi Aspose untuk PSD.)
+# (Termasuk .NET, libssl1.1, dan pemasangan lisensi Aspose untuk PSD.)
 
 name: Robot Desain Konten
 
@@ -26,6 +26,13 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0"
+
+      - name: Pasang libssl1.1 (dibutuhkan mesin Aspose)
+        run: |
+          URL1="http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb"
+          URL2="http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb"
+          wget -q "$URL1" -O /tmp/libssl.deb || wget -q "$URL2" -O /tmp/libssl.deb
+          sudo dpkg -i /tmp/libssl.deb
 
       - name: Install kebutuhan
         run: pip install -r requirements.txt
