@@ -1,0 +1,37 @@
+# File ini HARUS diletakkan di folder: .github/workflows/generate.yml
+# (Di GitHub, saat bikin file baru, ketik nama file persis: .github/workflows/generate.yml
+#  — folder-nya otomatis kebuat.)
+#
+# Fungsinya: menjalankan robot desain otomatis tiap 20 menit, GRATIS.
+
+name: Robot Desain Konten
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"    # jalan tiap 20 menit (waktu UTC). Ubah angkanya kalau mau.
+  workflow_dispatch:           # supaya ada tombol "Run workflow" buat tes manual
+
+jobs:
+  jalankan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Ambil kode
+        uses: actions/checkout@v4
+
+      - name: Siapkan Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install kebutuhan
+        run: pip install -r requirements.txt
+
+      - name: Jalankan robot
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
