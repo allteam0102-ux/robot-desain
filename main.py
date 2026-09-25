@@ -413,7 +413,16 @@ def build_psd_single(slides_data, workdir, safe_name):
             _psd_add_text(psd, s["headline"], 0.07, 0.52, 0.86, 0.17, 52, x_off)
             _psd_add_text(psd, s["body"],     0.07, 0.70, 0.86, 0.19, 30, x_off)
         out = os.path.join(workdir, f"{safe_name}.psd")
-        psd.save(out)
+        # simpan dengan kompresi RLE biar ukuran file jauh lebih kecil
+        try:
+            from aspose.psd.imageoptions import PsdOptions
+            from aspose.psd.fileformats.psd import CompressionMethod
+            opts = PsdOptions()
+            opts.compression_method = CompressionMethod.rle
+            psd.save(out, opts)
+        except Exception as ce:
+            print("    (kompresi PSD dilewati:", ce, ")")
+            psd.save(out)
         return out
     except Exception as e:
         print("    ! PSD gagal:", e)
@@ -436,10 +445,18 @@ def tg_photo(path, caption=""):
                       files={"photo": f}, timeout=120)
 
 def tg_document(path, caption=""):
-    with open(path, "rb") as f:
-        requests.post(f"{TG_BASE}/sendDocument",
-                      data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
-                      files={"document": f}, timeout=180)
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(f"{TG_BASE}/sendDocument",
+                              data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
+                              files={"document": f}, timeout=300)
+        if not r.ok:
+            print(f"    ! Telegram tolak dokumen ({r.status_code}): {r.text[:300]}")
+            return False
+        return True
+    except Exception as e:
+        print("    ! Gagal kirim dokumen:", e)
+        return False
 
 
 # ======================================================================
@@ -505,7 +522,15 @@ def process_page(page, workdir):
     if OUTPUT_PSD:
         psd_path = build_psd_single(slides_data, workdir, safe_name)
         if psd_path:
-            tg_document(psd_path, caption=f"{title} — .psd 1 file ({total} slide berjejer, teks bisa diedit di Photoshop)")
+            size_mb = os.path.getsize(psd_path) / 1024 / 1024
+            print(f"  Ukuran PSD: {size_mb:.1f} MB")
+            if size_mb > 49:
+                tg_message(f"⚠️ PSD '{title}' berukuran {size_mb:.0f} MB — melebihi batas kirim Telegram (50 MB). "
+                           f"Kabari aku, nanti kita kecilkan (turunkan resolusi) atau pisah per slide.")
+            else:
+                ok = tg_document(psd_path, caption=f"{title} — .psd 1 file ({total} slide berjejer, teks bisa diedit di Photoshop)")
+                if not ok:
+                    tg_message("⚠️ PSD gagal dikirim ke Telegram (cek log GitHub Actions).")
         elif ASPOSE_OK:
             tg_message("ℹ️ PSD gagal dibuat untuk konten ini (cek log GitHub Actions).")
 
