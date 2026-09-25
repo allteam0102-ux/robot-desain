@@ -106,7 +106,6 @@ if OUTPUT_PSD:
     try:
         from aspose.psd import Image as AsImage, Rectangle as AsRect, Color as AsColor
         from aspose.psd.fileformats.psd import PsdImage
-        from aspose.psd.fileformats.psd.layers import Layer as PsdLayer
         ASPOSE_OK = True
     except Exception as _e:
         print("  ! Aspose.PSD tidak tersedia, output PSD dilewati:", _e)
@@ -346,6 +345,15 @@ def build_pptx(slides_data, out_path):
 # ======================================================================
 # 5b. RAKIT .PSD (untuk Photoshop, teks bisa diketik ulang) — EKSPERIMENTAL
 # ======================================================================
+def _psd_white():
+    try:
+        return AsColor.from_argb(255, 255, 255, 255)
+    except Exception:
+        try:
+            return AsColor.white
+        except Exception:
+            return None
+
 def _psd_add_text(psd, text, x, y, w, h, size):
     if not text:
         return
@@ -353,9 +361,17 @@ def _psd_add_text(psd, text, x, y, w, h, size):
     tl = psd.add_text_layer(strip_marks(text.replace("\n", " ")), rect)
     try:
         td = tl.text_data
+        white = _psd_white()
         for portion in td.items:
-            portion.style.font_size = float(size)
-            portion.style.fill_color = AsColor.white
+            try:
+                portion.style.font_size = float(size)
+            except Exception:
+                pass
+            try:
+                if white is not None:
+                    portion.style.fill_color = white
+            except Exception:
+                pass
         td.update_layer_data()
     except Exception as te:
         print("    (gaya teks PSD dilewati:", te, ")")
@@ -368,8 +384,15 @@ def build_psd_files(slides_data, workdir):
     for s in slides_data:
         try:
             psd = PsdImage(CANVAS_W, CANVAS_H)
-            with AsImage.load(s["image_path"]) as bg:
-                psd.add_layer(PsdLayer(bg))               # layer background (bisa diganti gambarnya)
+            # background: bikin layer biasa lalu isi pikselnya dari foto yang sudah diolah
+            try:
+                layer = psd.add_regular_layer()
+                with AsImage.load(s["image_path"]) as raster:
+                    pixels = raster.load_argb_32_pixels(raster.bounds)
+                    layer.save_argb_32_pixels(AsRect(0, 0, CANVAS_W, CANVAS_H), pixels)
+            except Exception as be:
+                print("    (background PSD dilewati:", be, ")")
+            # teks (jadi layer teks yang bisa diketik ulang di Photoshop)
             _psd_add_text(psd, s["headline"], 0.07, 0.52, 0.86, 0.17, 52)
             _psd_add_text(psd, s["body"],     0.07, 0.70, 0.86, 0.19, 30)
             out = os.path.join(workdir, f'slide_{s["index"]}.psd')
