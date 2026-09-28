@@ -1,6 +1,6 @@
 # File ini diletakkan di: .github/workflows/generate.yml
 # Menjalankan robot desain otomatis tiap 20 menit, GRATIS.
-# (Termasuk .NET, libssl1.1, libgdiplus, dan lisensi Aspose untuk PSD.)
+# (Versi ringan — output pptx untuk Canva + svg untuk Figma. Tanpa Aspose.)
 
 name: Robot Desain Konten
 
@@ -22,36 +22,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Siapkan .NET (untuk Aspose/PSD)
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.0"
-
-      - name: Pasang komponen sistem (libssl1.1 + libgdiplus, untuk Aspose)
-        run: |
-          # libssl1.1
-          URL1="http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb"
-          URL2="http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb"
-          wget -q "$URL1" -O /tmp/libssl.deb || wget -q "$URL2" -O /tmp/libssl.deb
-          sudo dpkg -i /tmp/libssl.deb
-          # libgdiplus + font (untuk menggambar gambar & teks PSD)
-          sudo apt-get update
-          sudo apt-get install -y libgdiplus fontconfig fonts-dejavu
-
       - name: Install kebutuhan
         run: pip install -r requirements.txt
-
-      - name: Pasang lisensi Aspose (kalau ada)
-        env:
-          ASPOSE_LICENSE: ${{ secrets.ASPOSE_LICENSE }}
-        run: |
-          if [ -n "$ASPOSE_LICENSE" ]; then
-            printf '%s' "$ASPOSE_LICENSE" > "$GITHUB_WORKSPACE/Aspose.lic"
-            echo "ASPOSE_LICENSE_PATH=$GITHUB_WORKSPACE/Aspose.lic" >> "$GITHUB_ENV"
-            echo "Lisensi Aspose terpasang."
-          else
-            echo "Tidak ada lisensi Aspose (mode gratis)."
-          fi
 
       - name: Jalankan robot
         env:
@@ -61,6 +33,5 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STATUS_TYPE: ${{ secrets.STATUS_TYPE }}
-          ASPOSE_METERED_PUBLIC: ${{ secrets.ASPOSE_METERED_PUBLIC }}
-          ASPOSE_METERED_PRIVATE: ${{ secrets.ASPOSE_METERED_PRIVATE }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python main.py
