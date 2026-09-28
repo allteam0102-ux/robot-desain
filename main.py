@@ -15,6 +15,7 @@ import os
 import re
 import io
 import html
+import time
 import base64
 import random
 import tempfile
@@ -53,17 +54,24 @@ CANVAS_H = int(os.environ.get("CANVAS_H") or 1350)
 OUTPUT_PPTX = (os.environ.get("OUTPUT_PPTX") or "true").lower() == "true"
 OUTPUT_SVG  = (os.environ.get("OUTPUT_SVG")  or "true").lower() == "true"
 
-# Output "full AI" (opsional, BERBAYAR) — butuh OPENAI_API_KEY
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+# Output "full AI" (opsional, BERBAYAR/kuota) — butuh API key
 OUTPUT_AI      = (os.environ.get("OUTPUT_AI") or "auto").lower()   # true / false / auto (auto = nyala kalau ada key)
+AI_PROVIDER    = (os.environ.get("AI_PROVIDER") or "gemini").lower()   # "gemini" atau "openai"
+# --- OpenAI ---
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 AI_MODEL       = os.environ.get("AI_MODEL") or "gpt-image-1"
 AI_SIZE        = os.environ.get("AI_SIZE") or "1024x1536"          # portrait; nanti dipotong ke rasio kanvas
 AI_QUALITY     = os.environ.get("AI_QUALITY") or "medium"          # low / medium / high (makin tinggi makin mahal)
+# --- Gemini (Nano Banana) ---
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL   = os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash-image"
 
 def ai_enabled():
     if OUTPUT_AI == "false":
         return False
-    return bool(OPENAI_API_KEY)
+    if AI_PROVIDER == "openai":
+        return bool(OPENAI_API_KEY)
+    return bool(GEMINI_API_KEY)
 
 
 # ======================================================================
@@ -241,11 +249,11 @@ def prepare_image(img_bytes, out_path):
 
 
 # ======================================================================
-# 4b. DESAIN FULL AI (OpenAI / ChatGPT) — opsional, berbayar
+# 4b. DESAIN FULL AI (Gemini / OpenAI) — opsional, berbayar/kuota
 # ======================================================================
 def ai_build_prompt(headline, body):
     return (
-        f'High-end Instagram post design, portrait 4:5 aspect ratio, for "{BRAND_TAGLINE}", a premium '
+        f'High-end Instagram post design, portrait 4:5 vertical composition, for "{BRAND_TAGLINE}", a premium '
         f'marriage and relationship counseling brand. Cinematic, candid, editorial photography with muted '
         f'film tones and soft natural light. Elegant modern minimalist layout with sophisticated typography. '
         f'Prominent headline text, rendered exactly and spelled correctly: "{headline}". '
@@ -253,7 +261,7 @@ def ai_build_prompt(headline, body):
         f'bottom so the text stays readable. Clean, premium, social-media ready. All visible text in Indonesian.'
     )
 
-def ai_generate_design(headline, body, out_path):
+def _ai_openai(headline, body, out_path):
     if not OPENAI_API_KEY:
         return None
     try:
@@ -275,8 +283,49 @@ def ai_generate_design(headline, body, out_path):
         crop_to_canvas(im).save(out_path, "PNG")
         return out_path
     except Exception as e:
-        print("    ! AI generate gagal:", e)
+        print("    ! OpenAI generate gagal:", e)
         return None
+
+def _ai_gemini(headline, body, out_path):
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+        r = requests.post(
+            url,
+            params={"key": GEMINI_API_KEY},
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [{"parts": [{"text": ai_build_prompt(headline, body)}]}],
+                "generationConfig": {"responseModalities": ["IMAGE"]},
+            },
+            timeout=180,
+        )
+        if not r.ok:
+            print(f"    ! Gemini tolak ({r.status_code}): {r.text[:400]}")
+            return None
+        data = r.json()
+        parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts")) or []
+        b64 = None
+        for p in parts:
+            inline = p.get("inlineData") or p.get("inline_data")
+            if inline and inline.get("data"):
+                b64 = inline["data"]
+                break
+        if not b64:
+            print("    ! Gemini tidak mengembalikan gambar. Resp:", str(data)[:300])
+            return None
+        im = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+        crop_to_canvas(im).save(out_path, "PNG")
+        return out_path
+    except Exception as e:
+        print("    ! Gemini generate gagal:", e)
+        return None
+
+def ai_generate_design(headline, body, out_path):
+    if AI_PROVIDER == "openai":
+        return _ai_openai(headline, body, out_path)
+    return _ai_gemini(headline, body, out_path)
 
 
 # ======================================================================
@@ -480,29 +529,34 @@ def build_svg_single(slides_data, out_path, logo_path):
 # ======================================================================
 TG_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-def tg_message(text):
-    requests.post(f"{TG_BASE}/sendMessage",
-                  data={"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000]}, timeout=60)
-
-def tg_photo(path, caption=""):
-    with open(path, "rb") as f:
-        requests.post(f"{TG_BASE}/sendPhoto",
-                      data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
-                      files={"photo": f}, timeout=120)
-
-def tg_document(path, caption=""):
+def _tg_call(method, data, files=None, label=""):
     try:
-        with open(path, "rb") as f:
-            r = requests.post(f"{TG_BASE}/sendDocument",
-                              data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
-                              files={"document": f}, timeout=300)
-        if not r.ok:
-            print(f"    ! Telegram tolak dokumen ({r.status_code}): {r.text[:300]}")
+        r = requests.post(f"{TG_BASE}/{method}", data=data, files=files, timeout=300)
+        try:
+            j = r.json()
+        except Exception:
+            j = {}
+        time.sleep(0.5)  # jeda kecil biar tidak kena batas kirim Telegram
+        if not r.ok or not j.get("ok", False):
+            print(f"    ! Telegram {method} {label} GAGAL (HTTP {r.status_code}): {r.text[:300]}")
             return False
         return True
     except Exception as e:
-        print("    ! Gagal kirim dokumen:", e)
+        print(f"    ! Telegram {method} {label} ERROR: {e}")
         return False
+
+def tg_message(text):
+    return _tg_call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000]}, label="msg")
+
+def tg_photo(path, caption=""):
+    with open(path, "rb") as f:
+        return _tg_call("sendPhoto", {"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
+                        {"photo": f}, label="photo")
+
+def tg_document(path, caption=""):
+    with open(path, "rb") as f:
+        return _tg_call("sendDocument", {"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
+                        {"document": f}, label="doc")
 
 
 # ======================================================================
@@ -580,14 +634,15 @@ def process_page(page, workdir):
         if not ok:
             tg_message("⚠️ File .svg gagal dikirim (cek log).")
 
-    # OUTPUT 3: desain full AI (ChatGPT) — 1 gambar per konten
+    # OUTPUT 3: desain full AI (Gemini / OpenAI) — 1 gambar per konten
     if ai_enabled():
         first = slides_data[0]
         ai_path = os.path.join(workdir, f"{safe_name}_ai.png")
+        prov = "Gemini" if AI_PROVIDER != "openai" else "ChatGPT"
         if ai_generate_design(first["headline"], first["body"], ai_path):
-            tg_photo(ai_path, caption=f"{title} — 🤖 versi FULL AI (ChatGPT), {CANVAS_W}x{CANVAS_H}")
+            tg_photo(ai_path, caption=f"{title} — 🤖 versi FULL AI ({prov}), {CANVAS_W}x{CANVAS_H}")
         else:
-            tg_message("ℹ️ Versi AI gagal dibuat (cek log / saldo & akses OpenAI).")
+            tg_message(f"ℹ️ Versi AI ({prov}) gagal dibuat (cek log / kuota & akses API).")
 
     return total
 
@@ -597,6 +652,10 @@ def process_page(page, workdir):
 # ======================================================================
 def main():
     print(f"== Robot Desain Konten (v6, {CANVAS_W}x{CANVAS_H}) | pptx={OUTPUT_PPTX} svg={OUTPUT_SVG} ai={ai_enabled()} ==")
+    if tg_message("✅ Tes koneksi Telegram — robot mulai jalan."):
+        print("  Telegram OK (pesan tes terkirim).")
+    else:
+        print("  !! Telegram BERMASALAH — cek TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID di Secrets.")
     pages = notion_find_ready()
     print(f"Ditemukan {len(pages)} konten berstatus '{STATUS_READY}'.")
     if not pages:
