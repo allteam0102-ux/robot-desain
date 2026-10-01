@@ -27,7 +27,7 @@ import tempfile
 import traceback
 
 import requests
-from PIL import Image, ImageDraw, ImageStat, ImageEnhance
+from PIL import Image, ImageDraw, ImageStat, ImageEnhance, ImageChops, ImageFilter
 from pptx import Presentation
 from pptx.util import Emu, Pt
 from pptx.dml.color import RGBColor
@@ -49,8 +49,8 @@ FOOTER_TEXT   = os.environ.get("FOOTER_TEXT")   or "nikahinstitute.com  |  Kelas
 CTA_TEXT      = os.environ.get("CTA_TEXT")      or "GESER →"
 ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "7C3AED").lstrip("#")
 LOGO_URL      = os.environ.get("LOGO_URL")      or ""
-HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Poppins"
-BODY_FONT     = os.environ.get("BODY_FONT")     or "Poppins"
+HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Montserrat"
+BODY_FONT     = os.environ.get("BODY_FONT")     or "Montserrat"
 CTA_HANDLE    = os.environ.get("CTA_HANDLE")    or "@nikahinstitute"
 # gaya gambar: dibiaskan ke aesthetic/editorial luar negeri, premium, bukan norak
 STYLE_HINT    = os.environ.get("STYLE_HINT")    or "editorial lifestyle film"
@@ -373,46 +373,76 @@ ZONE_LAYOUT = {
     "right":  dict(hx=0.44, hy=0.33, hw=0.50, bx=0.44, by=0.53, bw=0.50, align="left"),
     "center": dict(hx=0.10, hy=0.37, hw=0.80, bx=0.10, by=0.57, bw=0.80, align="center"),
 }
-def head_pt(zone):  return 34 if zone in ("left", "right") else (36 if zone == "center" else 38)
-def body_pt(zone):  return 19 if zone in ("left", "right") else 21
-def head_px(zone):  return 54 if zone in ("left", "right") else (58 if zone == "center" else 60)
-def body_px(zone):  return 31 if zone in ("left", "right") else 34
+# Slide 1 (cover) judulnya besar; slide lain judul kecil (sesuai permintaan)
+def head_pt(zone, cover):  return 40 if cover else 23
+def body_pt(zone):         return 19 if zone in ("left", "right") else 21
+def head_px(zone, cover):  return 66 if cover else 37
+def body_px(zone):         return 31 if zone in ("left", "right") else 34
 
+def body_top(zone, cover):
+    L = ZONE_LAYOUT[zone]
+    return L["by"] if cover else (L["hy"] + 0.085)
+
+
+def _interp(stops, t):
+    """stops = [(frac, value), ...] menaik; interpolasi halus (smoothstep)."""
+    if t <= stops[0][0]:
+        return stops[0][1]
+    if t >= stops[-1][0]:
+        return stops[-1][1]
+    for i in range(1, len(stops)):
+        if t <= stops[i][0]:
+            t0, v0 = stops[i - 1]; t1, v1 = stops[i]
+            r = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+            r = r * r * (3 - 2 * r)  # smoothstep -> tanpa garis keras
+            return v0 + (v1 - v0) * r
+    return stops[-1][1]
+
+def _mask_v(stops):
+    col = Image.new("L", (1, CANVAS_H)); px = col.load()
+    for y in range(CANVAS_H):
+        px[0, y] = int(max(0, min(255, _interp(stops, y / (CANVAS_H - 1)))))
+    return col.resize((CANVAS_W, CANVAS_H))
+
+def _mask_h(stops):
+    row = Image.new("L", (CANVAS_W, 1)); px = row.load()
+    for x in range(CANVAS_W):
+        px[x, 0] = int(max(0, min(255, _interp(stops, x / (CANVAS_W - 1)))))
+    return row.resize((CANVAS_W, CANVAS_H))
 
 def bake_scrim(im, zone, out_path):
-    """Gelapkan area teks biar putih terbaca, mengikuti posisi zona."""
+    """
+    Gelapkan area teks dengan masking HALUS (smoothstep + blur), jadi nggak
+    ada garis potong. Untuk zona samping (kiri/kanan), gelapnya memudar juga
+    di atas & bawah supaya nggak kelihatan 'kepotong'.
+    """
     W, H = CANVAS_W, CANVAS_H
-    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
 
-    def vgrad(y0, y1, a0, a1):
-        span = max(1, y1 - y0)
-        for y in range(max(0, y0), min(H, y1)):
-            t = (y - y0) / span
-            draw.line([(0, y), (W, y)], fill=(0, 0, 0, int(a0 + (a1 - a0) * t)))
-
-    def hgrad(x0, x1, a0, a1):
-        span = max(1, x1 - x0)
-        for x in range(max(0, x0), min(W, x1)):
-            t = (x - x0) / span
-            draw.line([(x, 0), (x, H)], fill=(0, 0, 0, int(a0 + (a1 - a0) * t)))
+    # feather vertikal buat zona samping: habis mulus di tepi atas & bawah
+    vfeather = _mask_v([(0.0, 0), (0.17, 255), (0.83, 255), (1.0, 0)])
 
     if zone == "top":
-        vgrad(0, int(0.55 * H), 205, 0)
+        mask = _mask_v([(0.0, 210), (0.30, 170), (0.55, 0), (1.0, 0)])
     elif zone == "bottom":
-        vgrad(int(0.40 * H), H, 0, 225)
+        mask = _mask_v([(0.0, 0), (0.42, 0), (0.70, 170), (1.0, 225)])
     elif zone == "left":
-        hgrad(0, int(0.62 * W), 205, 0)
+        mask = ImageChops.multiply(_mask_h([(0.0, 210), (0.30, 150), (0.60, 0), (1.0, 0)]), vfeather)
     elif zone == "right":
-        hgrad(int(0.38 * W), W, 0, 205)
+        mask = ImageChops.multiply(_mask_h([(0.0, 0), (0.40, 0), (0.70, 150), (1.0, 210)]), vfeather)
     else:  # center
-        draw.rectangle([0, 0, W, H], fill=(0, 0, 0, 70))
-        vgrad(int(0.28 * H), int(0.80 * H), 110, 110)
+        mask = _mask_v([(0.0, 40), (0.30, 150), (0.70, 150), (1.0, 40)])
 
-    # strip tipis atas (logo & tagline) + bawah (footer & tombol) SELALU ada
-    vgrad(0, int(0.16 * H), 120, 0)
-    vgrad(int(0.86 * H), H, 0, 150)
+    # strip tipis atas (logo & tagline) + bawah (footer & tombol) SELALU ada,
+    # tapi juga mulus (smoothstep) -> digabung pakai 'lighter' (ambil yang tergelap)
+    top_strip = _mask_v([(0.0, 120), (0.16, 0), (1.0, 0)])
+    bot_strip = _mask_v([(0.0, 0), (0.86, 0), (1.0, 150)])
+    mask = ImageChops.lighter(ImageChops.lighter(mask, top_strip), bot_strip)
 
+    # blur tipis -> hilangkan banding/garis
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(10, W // 54)))
+
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 255))
+    overlay.putalpha(mask)
     Image.alpha_composite(im.convert("RGBA"), overlay).convert("RGB").save(out_path, "PNG")
     return out_path
 
@@ -600,14 +630,16 @@ def build_pptx(slides_data, out_path, logo_path):
                 _add_text(slide, 0.06, 0.93, 0.88, 0.055, FOOTER_TEXT, 11, False, BODY_FONT, "FFFFFF", align=PP_ALIGN.CENTER)
             continue
 
-        L = ZONE_LAYOUT.get(s.get("zone"), ZONE_LAYOUT["bottom"])
+        zone = s.get("zone", "bottom")
+        cover = (s.get("index") == 1)
+        L = ZONE_LAYOUT.get(zone, ZONE_LAYOUT["bottom"])
         al = _pp_align(L["align"])
         if s["headline"]:
             _add_text(slide, L["hx"], L["hy"], L["hw"], 0.18, s["headline"],
-                      head_pt(s["zone"]), True, HEADLINE_FONT, "FFFFFF", align=al, highlight=True)
+                      head_pt(zone, cover), True, HEADLINE_FONT, "FFFFFF", align=al, highlight=True)
         if s["body"]:
-            _add_text(slide, L["bx"], L["by"], L["bw"], 0.30, s["body"],
-                      body_pt(s["zone"]), False, BODY_FONT, "FFFFFF", align=al, highlight=True)
+            _add_text(slide, L["bx"], body_top(zone, cover), L["bw"], 0.34, s["body"],
+                      body_pt(zone), False, BODY_FONT, "FFFFFF", align=al, highlight=True)
         if FOOTER_TEXT:
             _add_text(slide, 0.06, 0.93, 0.58, 0.055, FOOTER_TEXT, 11, False, BODY_FONT, "FFFFFF")
         if s["total"] > 1 and CTA_TEXT:
@@ -710,7 +742,9 @@ def build_svg(slides_data, out_path, logo_path):
                                        int(0.88 * CANVAS_W), 20, False, BODY_FONT, anchor="middle"))
             continue
 
-        L = ZONE_LAYOUT.get(s.get("zone"), ZONE_LAYOUT["bottom"])
+        zone = s.get("zone", "bottom")
+        cover = (s.get("index") == 1)
+        L = ZONE_LAYOUT.get(zone, ZONE_LAYOUT["bottom"])
         if L["align"] == "center":
             anc = "middle"
             hx = xo + int((L["hx"] + L["hw"] / 2) * CANVAS_W)
@@ -721,11 +755,11 @@ def build_svg(slides_data, out_path, logo_path):
             bx = xo + int(L["bx"] * CANVAS_W)
         if s["headline"]:
             parts.append(_svg_text(s["headline"], hx, int(L["hy"] * H),
-                                   int(L["hw"] * CANVAS_W), head_px(s["zone"]), True, HEADLINE_FONT,
+                                   int(L["hw"] * CANVAS_W), head_px(zone, cover), True, HEADLINE_FONT,
                                    anchor=anc, highlight=True))
         if s["body"]:
-            parts.append(_svg_text(s["body"], bx, int(L["by"] * H),
-                                   int(L["bw"] * CANVAS_W), body_px(s["zone"]), False, BODY_FONT,
+            parts.append(_svg_text(s["body"], bx, int(body_top(zone, cover) * H),
+                                   int(L["bw"] * CANVAS_W), body_px(zone), False, BODY_FONT,
                                    anchor=anc, highlight=True))
         if FOOTER_TEXT:
             parts.append(_svg_text(FOOTER_TEXT, xo + int(0.06*CANVAS_W), int(0.925*H),
