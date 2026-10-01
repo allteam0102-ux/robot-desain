@@ -1,14 +1,9 @@
 # File ini diletakkan di: .github/workflows/generate.yml
-# Menjalankan robot desain otomatis tiap 20 menit, GRATIS.
-# (Versi ringan — output pptx untuk Canva + svg untuk Figma. Tanpa Aspose.)
-
-name: Robot Desain Konten
-
+name: Robot Desain Nikah Institute
 on:
   schedule:
-    - cron: "*/20 * * * *"    # tiap 20 menit (UTC)
-  workflow_dispatch:           # tombol "Run workflow" buat tes manual
-
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
 jobs:
   jalankan:
     runs-on: ubuntu-latest
@@ -16,15 +11,12 @@ jobs:
     steps:
       - name: Ambil kode
         uses: actions/checkout@v4
-
       - name: Siapkan Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install kebutuhan
         run: pip install -r requirements.txt
-
       - name: Jalankan robot
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
@@ -33,6 +25,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STATUS_TYPE: ${{ secrets.STATUS_TYPE }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LOGO_URL: ${{ secrets.LOGO_URL }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
         run: python main.py
