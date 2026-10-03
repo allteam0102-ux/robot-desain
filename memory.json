@@ -13,6 +13,10 @@
     "f9465296": {
       "title": "konten 1",
       "ts": 1791049701
+    },
+    "36e746e5": {
+      "title": "konten 1",
+      "ts": 1791050165
     }
   },
   "awaiting_text": null,
@@ -22,5 +26,7 @@
     "rejected": 0,
     "weekly": []
   },
-  "tg_offset": 669680839
+  "tg_offset": 669680839,
+  "resolved": [],
+  "_last_processed": 0
 }
