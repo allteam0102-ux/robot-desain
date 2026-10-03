@@ -19,10 +19,12 @@ BARU di versi ini:
 import os
 import re
 import io
+import json
 import html
 import time
 import base64
 import random
+import secrets
 import tempfile
 import traceback
 
@@ -62,6 +64,21 @@ CANVAS_H = int(os.environ.get("CANVAS_H") or 1350)
 OUTPUT_PPTX = (os.environ.get("OUTPUT_PPTX") or "true").lower() == "true"
 OUTPUT_SVG  = (os.environ.get("OUTPUT_SVG")  or "true").lower() == "true"
 OUTPUT_SVG_PER_SLIDE = (os.environ.get("OUTPUT_SVG_PER_SLIDE") or "true").lower() == "true"
+
+# ----------------------------------------------------------------------
+# SISTEM BELAJAR (memory + feedback). File memori disimpan di repo.
+# ----------------------------------------------------------------------
+MEMORY_PATH = os.environ.get("MEMORY_FILE") or "memory.json"
+LEARN_ENABLED = (os.environ.get("LEARN_ENABLED") or "true").lower() == "true"
+
+# "knob" yang bisa digeser oleh feedback (nilai awal = netral)
+G_HEAD_SCALE = 1.0   # pengali ukuran judul
+G_BODY_SCALE = 1.0   # pengali ukuran body
+G_SCRIM      = 1.0   # pengali kegelapan overlay/masking
+G_SOFT       = 0.0   # tambahan "film/soft" (0 = normal, makin besar makin lembut)
+
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
 
 # ======================================================================
@@ -337,7 +354,7 @@ def film_grade(im):
     if not FILM_GRADE:
         return im
     try:
-        im = ImageEnhance.Color(im).enhance(0.90)
+        im = ImageEnhance.Color(im).enhance(_clamp(0.90 - G_SOFT, 0.45, 1.0))  # knob: makin soft makin turun saturasi
         im = ImageEnhance.Contrast(im).enhance(1.04)
         im = ImageEnhance.Brightness(im).enhance(1.01)
         r, g, b = im.split()
@@ -388,10 +405,11 @@ ZONE_LAYOUT = {
     "center": dict(hx=0.10, hy=0.37, hw=0.80, bx=0.10, by=0.57, bw=0.80, align="center"),
 }
 # Slide 1 (cover) judulnya besar; slide lain judul kecil (sesuai permintaan)
-def head_pt(zone, cover):  return 40 if cover else 23
-def body_pt(zone):         return 19 if zone in ("left", "right") else 21
-def head_px(zone, cover):  return 66 if cover else 37
-def body_px(zone):         return 31 if zone in ("left", "right") else 34
+# Ukuran dikali "knob" dari sistem belajar (G_HEAD_SCALE / G_BODY_SCALE).
+def head_pt(zone, cover):  return max(10, int(round((40 if cover else 23) * G_HEAD_SCALE)))
+def body_pt(zone):         return max(9,  int(round((19 if zone in ("left", "right") else 21) * G_BODY_SCALE)))
+def head_px(zone, cover):  return max(16, int(round((66 if cover else 37) * G_HEAD_SCALE)))
+def body_px(zone):         return max(14, int(round((31 if zone in ("left", "right") else 34) * G_BODY_SCALE)))
 
 def body_top(zone, cover):
     L = ZONE_LAYOUT[zone]
@@ -451,6 +469,10 @@ def bake_scrim(im, zone, out_path):
     top_strip = _mask_v([(0.0, 120), (0.16, 0), (1.0, 0)])
     bot_strip = _mask_v([(0.0, 0), (0.86, 0), (1.0, 150)])
     mask = ImageChops.lighter(ImageChops.lighter(mask, top_strip), bot_strip)
+
+    # knob kegelapan overlay (dari sistem belajar)
+    if G_SCRIM != 1.0:
+        mask = mask.point(lambda v: int(_clamp(v * G_SCRIM, 0, 255)))
 
     # blur tipis -> hilangkan banding/garis
     mask = mask.filter(ImageFilter.GaussianBlur(radius=max(10, W // 54)))
@@ -864,11 +886,189 @@ def tg_document(path, caption=""):
     with open(path, "rb") as f:
         return _tg_call("sendDocument", {"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]}, {"document": f}, label="doc")
 
+def tg_buttons(text, keyboard):
+    """Kirim pesan + tombol inline. keyboard = list of rows, tiap tombol (label, callback_data)."""
+    kb = {"inline_keyboard": [[{"text": t, "callback_data": d} for (t, d) in row] for row in keyboard]}
+    return _tg_call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text[:3500],
+                                    "reply_markup": json.dumps(kb)}, label="btn")
+
+def tg_get_updates(offset):
+    try:
+        r = requests.get(f"{TG_BASE}/getUpdates",
+                         params={"offset": offset, "timeout": 0, "allowed_updates": json.dumps(["callback_query", "message"])},
+                         timeout=40)
+        j = r.json()
+        return j.get("result", []) if j.get("ok") else []
+    except Exception as e:
+        print("    ! getUpdates error:", e)
+        return []
+
+def tg_answer_callback(cb_id, text=""):
+    _tg_call("answerCallbackQuery", {"callback_query_id": cb_id, "text": text[:180]}, label="ans")
+
+
+# ======================================================================
+# 7b. SISTEM BELAJAR — memori + feedback (approve/reject + alasan)
+# ======================================================================
+DEFAULT_MEMORY = {
+    "preferences": {"head_scale": 1.0, "body_scale": 1.0, "scrim": 1.0, "soft": 0.0},
+    "pending": {},        # token -> {title, ts}
+    "awaiting_text": None,  # token yang menunggu alasan ketik
+    "log": [],            # riwayat {ts, title, status, reason}
+    "stats": {"approved": 0, "rejected": 0, "weekly": []},
+    "tg_offset": 0,
+}
+
+# tombol alasan saat Reject: (label, kode)
+REASON_BUTTONS = [
+    ("Teks kegedean", "tbig"),
+    ("Teks kekecilan", "tsmall"),
+    ("Teks susah kebaca", "hard"),
+    ("Overlay kegelapan", "dark"),
+    ("Gambar kurang aesthetic", "img"),
+    ("Alasan lain (ketik)", "other"),
+]
+REASON_LABEL = {k: v for v, k in REASON_BUTTONS}
+
+def load_memory():
+    try:
+        with open(MEMORY_PATH, "r", encoding="utf-8") as f:
+            mem = json.load(f)
+        for k, v in DEFAULT_MEMORY.items():
+            mem.setdefault(k, v if not isinstance(v, (dict, list)) else (dict(v) if isinstance(v, dict) else list(v)))
+        for k, v in DEFAULT_MEMORY["preferences"].items():
+            mem["preferences"].setdefault(k, v)
+        return mem
+    except Exception:
+        import copy
+        return copy.deepcopy(DEFAULT_MEMORY)
+
+def save_memory(mem):
+    try:
+        with open(MEMORY_PATH, "w", encoding="utf-8") as f:
+            json.dump(mem, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("    ! gagal simpan memori:", e)
+
+def apply_reason(prefs, code):
+    """Geser knob sesuai alasan. Mengembalikan deskripsi singkat perubahan."""
+    if code == "tbig":
+        prefs["head_scale"] = _clamp(prefs["head_scale"] - 0.06, 0.7, 1.3)
+        prefs["body_scale"] = _clamp(prefs["body_scale"] - 0.05, 0.7, 1.3)
+        return "teks dikecilin"
+    if code == "tsmall":
+        prefs["head_scale"] = _clamp(prefs["head_scale"] + 0.06, 0.7, 1.3)
+        prefs["body_scale"] = _clamp(prefs["body_scale"] + 0.05, 0.7, 1.3)
+        return "teks digedein"
+    if code == "hard":
+        prefs["scrim"] = _clamp(prefs["scrim"] + 0.12, 0.6, 1.6)
+        return "overlay dipergelap (biar teks kebaca)"
+    if code == "dark":
+        prefs["scrim"] = _clamp(prefs["scrim"] - 0.12, 0.6, 1.6)
+        return "overlay dipertipis"
+    if code == "img":
+        prefs["soft"] = _clamp(prefs["soft"] + 0.08, 0.0, 0.4)
+        return "gambar dibikin lebih soft/film"
+    return "dicatat (tanpa ubah setelan)"
+
+def prefs_summary(prefs):
+    return (f"Setelan belajar sekarang: judul {int(prefs['head_scale']*100)}%, "
+            f"body {int(prefs['body_scale']*100)}%, overlay {int(prefs['scrim']*100)}%, "
+            f"soft +{int(prefs['soft']*100)}%.")
+
+def process_feedback(mem):
+    """Baca pencetan tombol sejak run terakhir, update stats + knob."""
+    prefs = mem["preferences"]
+    updates = tg_get_updates(mem.get("tg_offset", 0) + 1)
+    changed = []
+    for up in updates:
+        mem["tg_offset"] = max(mem.get("tg_offset", 0), up.get("update_id", 0))
+
+        # pesan teks: alasan ketik / perintah stats / reset
+        msg = up.get("message")
+        if msg:
+            text = (msg.get("text") or "").strip()
+            low = text.lower()
+            if mem.get("awaiting_text"):
+                tok = mem["awaiting_text"]
+                if text:
+                    rec = mem["pending"].pop(tok, {"title": "?"})
+                    mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
+                                       "status": "rejected", "reason": "ketik: " + text[:120]})
+                    mem["awaiting_text"] = None
+                    tg_message(f"📝 Alasan dicatat: “{text[:120]}”. Makasih, bro.")
+                continue
+            if low in ("stats", "/stats", "statistik"):
+                a = mem["stats"]["approved"]; r = mem["stats"]["rejected"]; tot = a + r
+                rate = int(100 * a / tot) if tot else 0
+                tg_message(f"📊 Statistik belajar Nikah:\n"
+                           f"Approve {a} / Reject {r}  (approval rate {rate}%).\n"
+                           f"{prefs_summary(mem['preferences'])}")
+                continue
+            if low in ("/reset", "reset belajar"):
+                mem["preferences"] = dict(DEFAULT_MEMORY["preferences"])
+                tg_message("🔄 Setelan belajar direset ke awal (netral). Statistik tetap tersimpan.")
+                continue
+            continue
+
+        cb = up.get("callback_query")
+        if not cb:
+            continue
+        data = cb.get("data", "")
+        cb_id = cb.get("id", "")
+        parts = data.split(":")
+        kind = parts[0]
+        tok = parts[1] if len(parts) > 1 else ""
+
+        if kind == "a":   # approve
+            rec = mem["pending"].pop(tok, None)
+            mem["stats"]["approved"] += 1
+            mem["log"].append({"ts": int(time.time()), "title": (rec or {}).get("title", "?"),
+                               "status": "approved", "reason": ""})
+            tg_answer_callback(cb_id, "✅ Disimpan sebagai contoh bagus!")
+        elif kind == "r":  # reject -> minta alasan
+            mem["stats"]["rejected"] += 1
+            tg_answer_callback(cb_id, "❌ Oke, pilih alasannya ya.")
+            rows = []
+            row = []
+            for label, code in REASON_BUTTONS:
+                row.append((label, f"rs:{tok}:{code}"))
+                if len(row) == 2:
+                    rows.append(row); row = []
+            if row:
+                rows.append(row)
+            title = mem["pending"].get(tok, {}).get("title", "desain ini")
+            tg_buttons(f"Kenapa '{title}' ditolak?", rows)
+        elif kind == "rs":  # reason chosen
+            code = parts[2] if len(parts) > 2 else ""
+            if code == "other":
+                mem["awaiting_text"] = tok
+                tg_answer_callback(cb_id, "Ketik alasannya di chat ya.")
+                tg_message("✍️ Tulis alasan singkatnya di sini (1 pesan).")
+            else:
+                desc = apply_reason(prefs, code)
+                rec = mem["pending"].pop(tok, {"title": "?"})
+                mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
+                                   "status": "rejected", "reason": REASON_LABEL.get(code, code)})
+                changed.append(desc)
+                tg_answer_callback(cb_id, f"Paham. {desc}.")
+    if changed:
+        tg_message("🧠 Bot menyesuaikan diri: " + "; ".join(changed) + ".\n" + prefs_summary(prefs))
+    return mem
+
+def apply_prefs_to_globals(mem):
+    global G_HEAD_SCALE, G_BODY_SCALE, G_SCRIM, G_SOFT
+    p = mem.get("preferences", {})
+    G_HEAD_SCALE = float(p.get("head_scale", 1.0))
+    G_BODY_SCALE = float(p.get("body_scale", 1.0))
+    G_SCRIM      = float(p.get("scrim", 1.0))
+    G_SOFT       = float(p.get("soft", 0.0))
+
 
 # ======================================================================
 # 8. PROSES SATU KONTEN
 # ======================================================================
-def process_page(page, workdir):
+def process_page(page, workdir, mem=None):
     props = page["properties"]
     title = get_title(props) or "Tanpa Judul"
     fmt = read_property(props, FORMAT_PROPERTY, "select") or "Single Post"
@@ -966,6 +1166,13 @@ def process_page(page, workdir):
             if not tg_document(sp, caption=f"{title} — slide {s['index']}/{total} (.svg per slide)"):
                 tg_message(f"⚠️ SVG slide {s['index']} gagal dikirim (cek log).")
 
+    # ---- tombol penilaian (approve / reject) utk sistem belajar ----
+    if LEARN_ENABLED and mem is not None:
+        token = secrets.token_hex(4)
+        mem["pending"][token] = {"title": title, "ts": int(time.time())}
+        tg_buttons(f"Gimana desain '{title}'? Nilai ya biar bot makin ngerti seleramu 👇",
+                   [[("✅ Approve", f"a:{token}"), ("❌ Reject", f"r:{token}")]])
+
     return total
 
 
@@ -973,21 +1180,34 @@ def process_page(page, workdir):
 # 9. MAIN
 # ======================================================================
 def main():
-    print(f"== ROBOT DESAIN NIKAH INSTITUTE ({CANVAS_W}x{CANVAS_H}) | unsplash={'on' if UNSPLASH_ACCESS_KEY else 'off'} ==")
+    print(f"== ROBOT DESAIN NIKAH INSTITUTE ({CANVAS_W}x{CANVAS_H}) | unsplash={'on' if UNSPLASH_ACCESS_KEY else 'off'} | belajar={'on' if LEARN_ENABLED else 'off'} ==")
+
+    # 1) muat memori + 2) proses feedback (pencetan tombol) sejak run lalu
+    mem = load_memory()
+    if LEARN_ENABLED:
+        try:
+            mem = process_feedback(mem)
+        except Exception as e:
+            print("  ! proses feedback gagal:", e)
+        apply_prefs_to_globals(mem)
+        print("  " + prefs_summary(mem["preferences"]))
+
     if tg_message("✅ Robot Nikah Institute — mulai jalan."):
         print("  Telegram OK.")
     else:
         print("  !! Telegram BERMASALAH — cek TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID.")
+
     pages = notion_find_ready()
     print(f"Ditemukan {len(pages)} konten berstatus '{STATUS_READY}'.")
     if not pages:
-        print("Tidak ada yang perlu diproses. Selesai.")
+        print("Tidak ada konten baru. (Feedback tetap diproses.)")
+        save_memory(mem)
         return
     for page in pages:
         page_id = page["id"]
         workdir = tempfile.mkdtemp()
         try:
-            process_page(page, workdir)
+            process_page(page, workdir, mem)
             notion_set_status(page_id, STATUS_DONE, icon_emoji=DONE_EMOJI)
             print("  v Sukses & status ->", STATUS_DONE, "| ikon ->", DONE_EMOJI)
         except Exception as e:
@@ -999,6 +1219,8 @@ def main():
             except Exception:
                 pass
             notion_set_status(page_id, STATUS_ERROR, note=err)
+
+    save_memory(mem)
     print("== Selesai ==")
 
 
