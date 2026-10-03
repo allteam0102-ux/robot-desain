@@ -239,6 +239,20 @@ def parse_highlights(text):
             out.append((part, False))
     return out
 
+def rich_segments(text):
+    """Pecah teks jadi segmen (teks, stabilo?, miring?). ==stabilo== dan _miring_."""
+    out = []
+    for part in re.split(r"(==.+?==|_[^_\n]+_)", text):
+        if not part:
+            continue
+        if len(part) >= 4 and part.startswith("==") and part.endswith("=="):
+            out.append((part[2:-2], True, False))
+        elif len(part) >= 3 and part.startswith("_") and part.endswith("_"):
+            out.append((part[1:-1], False, True))
+        else:
+            out.append((part, False, False))
+    return out
+
 
 # ======================================================================
 # 4. GAMBAR (Unsplash utama, Pexels cadangan)
@@ -577,12 +591,13 @@ def _add_text(slide, left, top, width, height, text, size_pt, bold, font, color_
         p = tf.paragraphs[0] if first else tf.add_paragraph()
         first = False
         p.alignment = align
-        segs = parse_highlights(line) if highlight else [(line, False)]
-        for seg, is_hl in (segs or [("", False)]):
+        segs = rich_segments(line) if highlight else [(line, False, False)]
+        for seg, is_hl, is_it in (segs or [("", False, False)]):
             run = p.add_run()
             run.text = seg
             f = run.font
             f.size = Pt(size_pt); f.bold = bold or is_hl; f.name = font
+            f.italic = is_it
             f.color.rgb = ACCENT if is_hl else hex_rgb(color_hex)
     return box
 
@@ -671,38 +686,45 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
     'x' = titik acuan: kiri (start), tengah (middle), kanan (end).
     """
     weight = "700" if bold else "400"
-    lh = int(size * gap)
-    out = []
-    yy = y
-    # SATU <text> per PARAGRAF, satu baris utuh (TANPA wrap manual). Kenapa:
-    # SVG butuh atribut x di tiap baris utk wrap, dan Figma menjadikan tiap
-    # <tspan> ber-x sebagai LAYER terpisah -> teks "kepisah per baris".
-    # Dgn satu baris, tiap paragraf = 1 layer teks di Figma (gampang diedit),
-    # tinggal tarik lebar kotaknya utk wrap. Warna stabilo tetap inline (1 layer).
-    for para in text.split("\n"):
-        segs = parse_highlights(para) if highlight else [(para, False)]
-        plain = "".join(s for s, _ in segs)
-        if not plain.strip():
-            yy += lh; continue
-        estw = _est_w(plain, size)
-        if anchor == "middle":
-            lx = int(x - estw / 2)
-        elif anchor == "end":
-            lx = int(x - estw)
-        else:
-            lx = int(x)
-        frag = ""
-        for s, is_hl in segs:
+    # SATU <text> untuk SELURUH blok teks ini (headline = 1 blok, body = 1 blok).
+    # Baris (Enter di Notion) dipisah pakai NEWLINE ASLI di dalam satu elemen,
+    # TANPA <tspan> ber-posisi. Alasan: Figma memecah tiap <tspan> ber-x/-dy jadi
+    # LAYER terpisah; dgn newline asli, Figma menyatukannya jadi SATU text box
+    # berisi baris-barisnya. Warna stabilo tetap inline (tidak bikin layer baru).
+    raw_lines = text.split("\n")
+    nonempty = [l for l in raw_lines if l.strip()]
+    if not nonempty:
+        return ""
+    def est_line(line):
+        plain = "".join(s for s, _, _ in (rich_segments(line) if highlight else [(line, False, False)]))
+        return _est_w(plain, size)
+    maxw = max(est_line(l) for l in nonempty)
+    if anchor == "middle":
+        lx = int(x - maxw / 2)
+    elif anchor == "end":
+        lx = int(x - maxw)
+    else:
+        lx = int(x)
+    base = y + size
+    parts = []
+    for li, line in enumerate(raw_lines):
+        if li > 0:
+            parts.append("\n")   # newline asli -> jadi line break di dalam 1 text box Figma
+        for s, is_hl, is_it in (rich_segments(line) if highlight else [(line, False, False)]):
             if s == "":
                 continue
-            token = _svg_escape(s)
-            frag += (f'<tspan fill="#{ACCENT_COLOR}">{token}</tspan>' if is_hl else token)
-        base = yy + size
-        out.append(f'<text x="{lx}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
-                   f'fill="#FFFFFF" font-family="{_svg_escape(font)}, Arial, sans-serif" '
-                   f'font-size="{size}" font-weight="{weight}">{frag}</text>')
-        yy += lh
-    return "\n".join(out)
+            tok = _svg_escape(s)
+            if is_hl:
+                parts.append(f'<tspan fill="#{ACCENT_COLOR}">{tok}</tspan>')
+            elif is_it:
+                parts.append(f'<tspan font-style="italic">{tok}</tspan>')
+            else:
+                parts.append(tok)
+    content = "".join(parts)
+    return (f'<text x="{lx}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
+            f'style="white-space:pre" fill="#FFFFFF" '
+            f'font-family="{_svg_escape(font)}, Arial, sans-serif" '
+            f'font-size="{size}" font-weight="{weight}">{content}</text>')
 
 
 # ---------- masking versi VEKTOR (editable di Figma) ----------
