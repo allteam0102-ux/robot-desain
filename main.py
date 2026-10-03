@@ -913,6 +913,7 @@ def tg_answer_callback(cb_id, text=""):
 DEFAULT_MEMORY = {
     "preferences": {"head_scale": 1.0, "body_scale": 1.0, "scrim": 1.0, "soft": 0.0},
     "pending": {},        # token -> {title, ts}
+    "resolved": [],       # token yang sudah dinilai (anti dobel)
     "awaiting_text": None,  # token yang menunggu alasan ketik
     "log": [],            # riwayat {ts, title, status, reason}
     "stats": {"approved": 0, "rejected": 0, "weekly": []},
@@ -976,15 +977,25 @@ def prefs_summary(prefs):
             f"body {int(prefs['body_scale']*100)}%, overlay {int(prefs['scrim']*100)}%, "
             f"soft +{int(prefs['soft']*100)}%.")
 
+def _mark_resolved(mem, tok):
+    res = mem.setdefault("resolved", [])
+    if tok not in res:
+        res.append(tok)
+    if len(res) > 500:
+        del res[:len(res) - 500]
+
 def process_feedback(mem):
-    """Baca pencetan tombol sejak run terakhir, update stats + knob."""
+    """Baca pencetan tombol sejak run terakhir, update stats + knob.
+    Knob diterapkan BERDASARKAN alasan yg dipencet (tidak tergantung 'pending'),
+    biar tetap jalan walau catatan pending hilang. Anti-dobel pakai daftar 'resolved'."""
     prefs = mem["preferences"]
     updates = tg_get_updates(mem.get("tg_offset", 0) + 1)
     changed = []
+    processed = 0
     for up in updates:
         mem["tg_offset"] = max(mem.get("tg_offset", 0), up.get("update_id", 0))
 
-        # pesan teks: alasan ketik / perintah stats / reset
+        # ---- pesan teks: alasan ketik / perintah stats / reset ----
         msg = up.get("message")
         if msg:
             text = (msg.get("text") or "").strip()
@@ -996,6 +1007,7 @@ def process_feedback(mem):
                     mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
                                        "status": "rejected", "reason": "ketik: " + text[:120]})
                     mem["awaiting_text"] = None
+                    processed += 1
                     tg_message(f"📝 Alasan dicatat: “{text[:120]}”. Makasih, bro.")
                 continue
             if low in ("stats", "/stats", "statistik"):
@@ -1007,10 +1019,12 @@ def process_feedback(mem):
                 continue
             if low in ("/reset", "reset belajar"):
                 mem["preferences"] = dict(DEFAULT_MEMORY["preferences"])
+                prefs = mem["preferences"]
                 tg_message("🔄 Setelan belajar direset ke awal (netral). Statistik tetap tersimpan.")
                 continue
             continue
 
+        # ---- pencetan tombol (callback) ----
         cb = up.get("callback_query")
         if not cb:
             continue
@@ -1019,38 +1033,44 @@ def process_feedback(mem):
         parts = data.split(":")
         kind = parts[0]
         tok = parts[1] if len(parts) > 1 else ""
-        already = (tok not in mem["pending"]) and (mem.get("awaiting_text") != tok)
+        if tok and tok in mem.get("resolved", []):
+            tg_answer_callback(cb_id, "Sudah dinilai sebelumnya 👍"); continue
 
         if kind == "a":                      # approve (1x pencet)
-            if already:
-                tg_answer_callback(cb_id, "Sudah dinilai sebelumnya 👍"); continue
             rec = mem["pending"].pop(tok, {"title": "?"})
             mem["stats"]["approved"] += 1
+            _mark_resolved(mem, tok); processed += 1
             mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
                                "status": "approved", "reason": ""})
             tg_answer_callback(cb_id, "✅ Disimpan sebagai contoh bagus!")
-            tg_message(f"✅ '{rec.get('title','desain')}' kamu approve. Disimpan jadi contoh bagus.")
-        elif kind == "rs":                   # reject + alasan (1x pencet)
+        elif kind == "rs":                   # reject + alasan (1x pencet) -> knob LANGSUNG dipakai
             code = parts[2] if len(parts) > 2 else ""
-            if already:
-                tg_answer_callback(cb_id, "Sudah dinilai sebelumnya 👍"); continue
             if code == "other":
-                if tok in mem["pending"]:
-                    mem["stats"]["rejected"] += 1
+                mem["stats"]["rejected"] += 1
                 mem["awaiting_text"] = tok
+                _mark_resolved(mem, tok); processed += 1
                 tg_answer_callback(cb_id, "Oke, ketik alasannya di chat ya.")
                 tg_message("✍️ Tulis alasan singkatnya di sini (1 pesan).")
             else:
-                if tok in mem["pending"]:
-                    mem["stats"]["rejected"] += 1
-                desc = apply_reason(prefs, code)
+                mem["stats"]["rejected"] += 1
+                desc = apply_reason(prefs, code)   # <-- berdasarkan kode, bukan pending
                 rec = mem["pending"].pop(tok, {"title": "?"})
+                _mark_resolved(mem, tok); processed += 1
                 mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
                                    "status": "rejected", "reason": REASON_LABEL.get(code, code)})
                 changed.append(desc)
                 tg_answer_callback(cb_id, f"Paham. {desc}.")
-    if changed:
-        tg_message("🧠 Bot menyesuaikan diri: " + "; ".join(changed) + ".\n" + prefs_summary(prefs))
+        elif kind == "r":                    # kompat tombol lama (Reject 2-langkah) -> abaikan halus
+            tg_answer_callback(cb_id, "Pakai tombol alasan di desain baru ya 🙏")
+
+    # laporan ke Telegram biar KELIHATAN bot baca feedback
+    if processed > 0:
+        head = f"🔎 Feedback terbaca: {processed} pencetan diproses."
+        if changed:
+            head += "\n🧠 Bot menyesuaikan diri: " + "; ".join(changed) + "."
+        head += "\n" + prefs_summary(prefs)
+        tg_message(head)
+    mem["_last_processed"] = processed
     return mem
 
 def apply_prefs_to_globals(mem):
@@ -1198,17 +1218,15 @@ def main():
         apply_prefs_to_globals(mem)
         print("  " + prefs_summary(mem["preferences"]))
 
-    if tg_message("✅ Robot Nikah Institute — mulai jalan."):
-        print("  Telegram OK.")
-    else:
-        print("  !! Telegram BERMASALAH — cek TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID.")
-
     pages = notion_find_ready()
     print(f"Ditemukan {len(pages)} konten berstatus '{STATUS_READY}'.")
     if not pages:
+        # tidak ada kerjaan -> jangan spam Telegram tiap 10 menit, cukup simpan memori
         print("Tidak ada konten baru. (Feedback tetap diproses.)")
         save_memory(mem)
         return
+
+    tg_message(f"✅ Robot Nikah Institute jalan — ada {len(pages)} konten baru.")
     for page in pages:
         page_id = page["id"]
         workdir = tempfile.mkdtemp()
