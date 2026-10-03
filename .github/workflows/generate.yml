@@ -2,8 +2,10 @@
 name: Robot Desain Nikah Institute
 on:
   schedule:
-    - cron: "*/20 * * * *"
-  workflow_dispatch:
+    - cron: "*/10 * * * *"    # cek tiap 10 menit
+  workflow_dispatch:           # tombol "Run workflow" manual
+  repository_dispatch:         # pintu buat jalur INSTAN (opsional, lewat relay Notion->GitHub)
+    types: [notion-siap-desain]
 
 # izin menulis balik file memori (memory.json) ke repo
 permissions:
