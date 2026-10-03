@@ -671,61 +671,37 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
     'x' = titik acuan: kiri (start), tengah (middle), kanan (end).
     """
     weight = "700" if bold else "400"
-    max_chars = max(6, int(width / (size * 0.55)))
     lh = int(size * gap)
-    def words_of(line):
-        res = []
-        for seg, is_hl in (parse_highlights(line) if highlight else [(line, False)]):
-            for w in seg.split(" "):
-                if w != "":
-                    res.append((w, is_hl))
-        return res
     out = []
     yy = y
+    # SATU <text> per PARAGRAF, satu baris utuh (TANPA wrap manual). Kenapa:
+    # SVG butuh atribut x di tiap baris utk wrap, dan Figma menjadikan tiap
+    # <tspan> ber-x sebagai LAYER terpisah -> teks "kepisah per baris".
+    # Dgn satu baris, tiap paragraf = 1 layer teks di Figma (gampang diedit),
+    # tinggal tarik lebar kotaknya utk wrap. Warna stabilo tetap inline (1 layer).
     for para in text.split("\n"):
-        ws = words_of(para)
-        if not ws:
+        segs = parse_highlights(para) if highlight else [(para, False)]
+        plain = "".join(s for s, _ in segs)
+        if not plain.strip():
             yy += lh; continue
-        # wrap jadi beberapa baris visual
-        vlines, cur, cur_len = [], [], 0
-        for w, is_hl in ws:
-            add = len(w) + (1 if cur else 0)
-            if cur and cur_len + add > max_chars:
-                vlines.append(cur); cur, cur_len = [], 0; add = len(w)
-            cur.append((w, is_hl)); cur_len += add
-        if cur:
-            vlines.append(cur)
-        # SATU <text> per paragraf. SELALU text-anchor="start", lalu x tiap baris
-        # digeser manual utk center/right. Alasan: kalau pakai anchor middle/end,
-        # sebagian renderer (cairosvg/Figma) me-reposisi tiap <tspan> ke titik
-        # anchor -> kata stabilo numpuk. Dgn start, kata inline mengalir normal.
-        # Spasi pengaman di akhir baris: kalau viewer menggabung baris jadi 1,
-        # kata tidak nempel. x pada <text> = x baris pertama (biar Figma baca posisi benar).
-        def line_x(vl):
-            lw = _est_w(" ".join(w for w, _ in vl), size)
-            if anchor == "middle":
-                return int(x - lw / 2)
-            if anchor == "end":
-                return int(x - lw)
-            return int(x)
+        estw = _est_w(plain, size)
+        if anchor == "middle":
+            lx = int(x - estw / 2)
+        elif anchor == "end":
+            lx = int(x - estw)
+        else:
+            lx = int(x)
+        frag = ""
+        for s, is_hl in segs:
+            if s == "":
+                continue
+            token = _svg_escape(s)
+            frag += (f'<tspan fill="#{ACCENT_COLOR}">{token}</tspan>' if is_hl else token)
         base = yy + size
-        n = len(vlines)
-        line_spans = []
-        first_x = line_x(vlines[0])
-        for li, vl in enumerate(vlines):
-            frag = ""
-            for k, (w, is_hl) in enumerate(vl):
-                prefix = " " if k > 0 else ""
-                token = _svg_escape(prefix + w)
-                frag += (f'<tspan fill="#{ACCENT_COLOR}">{token}</tspan>' if is_hl else token)
-            if li < n - 1:
-                frag += " "
-            dy = 0 if li == 0 else lh
-            line_spans.append(f'<tspan x="{line_x(vl)}" dy="{dy}">{frag}</tspan>')
-        out.append(f'<text x="{first_x}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
+        out.append(f'<text x="{lx}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
                    f'fill="#FFFFFF" font-family="{_svg_escape(font)}, Arial, sans-serif" '
-                   f'font-size="{size}" font-weight="{weight}">{"".join(line_spans)}</text>')
-        yy += lh * n
+                   f'font-size="{size}" font-weight="{weight}">{frag}</text>')
+        yy += lh
     return "\n".join(out)
 
 
