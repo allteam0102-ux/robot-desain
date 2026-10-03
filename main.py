@@ -1019,33 +1019,30 @@ def process_feedback(mem):
         parts = data.split(":")
         kind = parts[0]
         tok = parts[1] if len(parts) > 1 else ""
+        already = (tok not in mem["pending"]) and (mem.get("awaiting_text") != tok)
 
-        if kind == "a":   # approve
-            rec = mem["pending"].pop(tok, None)
+        if kind == "a":                      # approve (1x pencet)
+            if already:
+                tg_answer_callback(cb_id, "Sudah dinilai sebelumnya 👍"); continue
+            rec = mem["pending"].pop(tok, {"title": "?"})
             mem["stats"]["approved"] += 1
-            mem["log"].append({"ts": int(time.time()), "title": (rec or {}).get("title", "?"),
+            mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
                                "status": "approved", "reason": ""})
             tg_answer_callback(cb_id, "✅ Disimpan sebagai contoh bagus!")
-        elif kind == "r":  # reject -> minta alasan
-            mem["stats"]["rejected"] += 1
-            tg_answer_callback(cb_id, "❌ Oke, pilih alasannya ya.")
-            rows = []
-            row = []
-            for label, code in REASON_BUTTONS:
-                row.append((label, f"rs:{tok}:{code}"))
-                if len(row) == 2:
-                    rows.append(row); row = []
-            if row:
-                rows.append(row)
-            title = mem["pending"].get(tok, {}).get("title", "desain ini")
-            tg_buttons(f"Kenapa '{title}' ditolak?", rows)
-        elif kind == "rs":  # reason chosen
+            tg_message(f"✅ '{rec.get('title','desain')}' kamu approve. Disimpan jadi contoh bagus.")
+        elif kind == "rs":                   # reject + alasan (1x pencet)
             code = parts[2] if len(parts) > 2 else ""
+            if already:
+                tg_answer_callback(cb_id, "Sudah dinilai sebelumnya 👍"); continue
             if code == "other":
+                if tok in mem["pending"]:
+                    mem["stats"]["rejected"] += 1
                 mem["awaiting_text"] = tok
-                tg_answer_callback(cb_id, "Ketik alasannya di chat ya.")
+                tg_answer_callback(cb_id, "Oke, ketik alasannya di chat ya.")
                 tg_message("✍️ Tulis alasan singkatnya di sini (1 pesan).")
             else:
+                if tok in mem["pending"]:
+                    mem["stats"]["rejected"] += 1
                 desc = apply_reason(prefs, code)
                 rec = mem["pending"].pop(tok, {"title": "?"})
                 mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
@@ -1166,12 +1163,21 @@ def process_page(page, workdir, mem=None):
             if not tg_document(sp, caption=f"{title} — slide {s['index']}/{total} (.svg per slide)"):
                 tg_message(f"⚠️ SVG slide {s['index']} gagal dikirim (cek log).")
 
-    # ---- tombol penilaian (approve / reject) utk sistem belajar ----
+    # ---- tombol penilaian (1x pencet langsung selesai) utk sistem belajar ----
     if LEARN_ENABLED and mem is not None:
         token = secrets.token_hex(4)
         mem["pending"][token] = {"title": title, "ts": int(time.time())}
-        tg_buttons(f"Gimana desain '{title}'? Nilai ya biar bot makin ngerti seleramu 👇",
-                   [[("✅ Approve", f"a:{token}"), ("❌ Reject", f"r:{token}")]])
+        rows = [[("✅ Approve (oke!)", f"a:{token}")]]
+        rr = []
+        for label, code in REASON_BUTTONS:
+            prefix = "✍️ " if code == "other" else "❌ "
+            rr.append((prefix + label, f"rs:{token}:{code}"))
+            if len(rr) == 2:
+                rows.append(rr); rr = []
+        if rr:
+            rows.append(rr)
+        tg_buttons(f"Nilai desain '{title}' 👇\n"
+                   f"✅ kalau udah oke — atau langsung pencet alasannya kalau ada yang kurang pas:", rows)
 
     return total
 
