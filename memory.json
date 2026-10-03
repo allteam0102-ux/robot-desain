@@ -1,0 +1,22 @@
+{
+  "preferences": {
+    "head_scale": 1.0,
+    "body_scale": 1.0,
+    "scrim": 1.0,
+    "soft": 0.0
+  },
+  "pending": {
+    "97bdc914": {
+      "title": "konten 1",
+      "ts": 1791049039
+    }
+  },
+  "awaiting_text": null,
+  "log": [],
+  "stats": {
+    "approved": 0,
+    "rejected": 0,
+    "weekly": []
+  },
+  "tg_offset": 669680839
+}
