@@ -695,29 +695,37 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
             cur.append((w, is_hl)); cur_len += add
         if cur:
             vlines.append(cur)
-        # satu <text> untuk paragraf ini; tiap baris = <tspan x dy>
-        line_spans = []
-        for li, vl in enumerate(vlines):
-            line_str = " ".join(w for w, _ in vl)
-            lw = _est_w(line_str, size)
+        # SATU <text> per paragraf. SELALU text-anchor="start", lalu x tiap baris
+        # digeser manual utk center/right. Alasan: kalau pakai anchor middle/end,
+        # sebagian renderer (cairosvg/Figma) me-reposisi tiap <tspan> ke titik
+        # anchor -> kata stabilo numpuk. Dgn start, kata inline mengalir normal.
+        # Spasi pengaman di akhir baris: kalau viewer menggabung baris jadi 1,
+        # kata tidak nempel. x pada <text> = x baris pertama (biar Figma baca posisi benar).
+        def line_x(vl):
+            lw = _est_w(" ".join(w for w, _ in vl), size)
             if anchor == "middle":
-                lx = int(x - lw / 2)
-            elif anchor == "end":
-                lx = int(x - lw)
-            else:
-                lx = int(x)
-            runs = ""
+                return int(x - lw / 2)
+            if anchor == "end":
+                return int(x - lw)
+            return int(x)
+        base = yy + size
+        n = len(vlines)
+        line_spans = []
+        first_x = line_x(vlines[0])
+        for li, vl in enumerate(vlines):
+            frag = ""
             for k, (w, is_hl) in enumerate(vl):
                 prefix = " " if k > 0 else ""
-                fill = ACCENT_COLOR if is_hl else "FFFFFF"
-                runs += f'<tspan fill="#{fill}">{_svg_escape(prefix + w)}</tspan>'
+                token = _svg_escape(prefix + w)
+                frag += (f'<tspan fill="#{ACCENT_COLOR}">{token}</tspan>' if is_hl else token)
+            if li < n - 1:
+                frag += " "
             dy = 0 if li == 0 else lh
-            line_spans.append(f'<tspan x="{lx}" dy="{dy}">{runs}</tspan>')
-        base = yy + size
-        out.append(f'<text x="{int(x)}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
-                   f'font-family="{_svg_escape(font)}, Arial, sans-serif" '
+            line_spans.append(f'<tspan x="{line_x(vl)}" dy="{dy}">{frag}</tspan>')
+        out.append(f'<text x="{first_x}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
+                   f'fill="#FFFFFF" font-family="{_svg_escape(font)}, Arial, sans-serif" '
                    f'font-size="{size}" font-weight="{weight}">{"".join(line_spans)}</text>')
-        yy += lh * len(vlines)
+        yy += lh * n
     return "\n".join(out)
 
 
