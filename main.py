@@ -665,13 +665,14 @@ def _est_w(s, size):
 
 def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=False, gap=1.25):
     """
-    Semua <text> dipakai anchor="start" lalu x-nya digeser manual supaya
-    center/right tetap benar. Ini penting: beberapa renderer (cairosvg/Figma)
-    menaruh tiap <tspan> di titik anchor kalau anchor=middle/end -> teks numpuk.
-    'x' = titik acuan: kiri (start), tengah (middle), atau kanan (end).
+    SATU <text> per PARAGRAF (biar di Figma jadi 1 layer teks yang gampang
+    diedit). Pemisahan baris (wrap) pakai <tspan dy=...> di dalam <text> yang
+    sama, bukan <text> terpisah. Warna stabilo tetap jalan lewat tspan fill.
+    'x' = titik acuan: kiri (start), tengah (middle), kanan (end).
     """
     weight = "700" if bold else "400"
     max_chars = max(6, int(width / (size * 0.55)))
+    lh = int(size * gap)
     def words_of(line):
         res = []
         for seg, is_hl in (parse_highlights(line) if highlight else [(line, False)]):
@@ -681,10 +682,11 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
         return res
     out = []
     yy = y
-    for src in text.split("\n"):
-        ws = words_of(src)
+    for para in text.split("\n"):
+        ws = words_of(para)
         if not ws:
-            yy += int(size * gap); continue
+            yy += lh; continue
+        # wrap jadi beberapa baris visual
         vlines, cur, cur_len = [], [], 0
         for w, is_hl in ws:
             add = len(w) + (1 if cur else 0)
@@ -693,8 +695,9 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
             cur.append((w, is_hl)); cur_len += add
         if cur:
             vlines.append(cur)
-        for vl in vlines:
-            base = yy + size
+        # satu <text> untuk paragraf ini; tiap baris = <tspan x dy>
+        line_spans = []
+        for li, vl in enumerate(vlines):
             line_str = " ".join(w for w, _ in vl)
             lw = _est_w(line_str, size)
             if anchor == "middle":
@@ -703,26 +706,70 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
                 lx = int(x - lw)
             else:
                 lx = int(x)
-            spans = ""
+            runs = ""
             for k, (w, is_hl) in enumerate(vl):
                 prefix = " " if k > 0 else ""
                 fill = ACCENT_COLOR if is_hl else "FFFFFF"
-                spans += f'<tspan fill="#{fill}">{_svg_escape(prefix + w)}</tspan>'
-            out.append(f'<text x="{lx}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
-                       f'font-family="{_svg_escape(font)}, Arial, sans-serif" '
-                       f'font-size="{size}" font-weight="{weight}">{spans}</text>')
-            yy += int(size * gap)
+                runs += f'<tspan fill="#{fill}">{_svg_escape(prefix + w)}</tspan>'
+            dy = 0 if li == 0 else lh
+            line_spans.append(f'<tspan x="{lx}" dy="{dy}">{runs}</tspan>')
+        base = yy + size
+        out.append(f'<text x="{int(x)}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
+                   f'font-family="{_svg_escape(font)}, Arial, sans-serif" '
+                   f'font-size="{size}" font-weight="{weight}">{"".join(line_spans)}</text>')
+        yy += lh * len(vlines)
     return "\n".join(out)
+
+
+# ---------- masking versi VEKTOR (editable di Figma) ----------
+def _grad_lin(gid, vertical, stops):
+    coords = 'x1="0" y1="0" x2="0" y2="1"' if vertical else 'x1="0" y1="0" x2="1" y2="0"'
+    s = "".join(f'<stop offset="{o}" stop-color="#000000" stop-opacity="{op}"/>' for o, op in stops)
+    return f'<linearGradient id="{gid}" {coords}>{s}</linearGradient>'
+
+def _grad_rad(gid, cx, stops):
+    s = "".join(f'<stop offset="{o}" stop-color="#000000" stop-opacity="{op}"/>' for o, op in stops)
+    return f'<radialGradient id="{gid}" cx="{cx}" cy="0.5" r="0.8">{s}</radialGradient>'
+
+def _scrim_svg(zone, xo, idx):
+    """Kembalikan (defs, rects) berisi gradasi gelap sebagai elemen vektor."""
+    W, H = CANVAS_W, CANVAS_H
+    gid = f"sc{idx}"
+    defs, rects = [], []
+    # gradasi utama sesuai zona
+    if zone == "top":
+        defs.append(_grad_lin(gid, True, [(0, 0.80), (0.55, 0), (1, 0)]))
+    elif zone == "left":
+        defs.append(_grad_lin(gid, False, [(0, 0.80), (0.60, 0), (1, 0)]))
+    elif zone == "right":
+        defs.append(_grad_lin(gid, False, [(0, 0), (0.40, 0), (1, 0.80)]))
+    elif zone == "center":
+        defs.append(_grad_rad(gid, 0.5, [(0, 0.60), (1, 0.06)]))
+    else:  # bottom
+        defs.append(_grad_lin(gid, True, [(0, 0), (0.42, 0), (1, 0.88)]))
+    rects.append(f'<rect x="{xo}" y="0" width="{W}" height="{H}" fill="url(#{gid})"/>')
+    # strip tipis atas (logo/tagline) & bawah (footer/tombol) — tetap editable
+    defs.append(_grad_lin(gid + "t", True, [(0, 0.45), (1, 0)]))
+    defs.append(_grad_lin(gid + "b", True, [(0, 0), (1, 0.55)]))
+    rects.append(f'<rect x="{xo}" y="0" width="{W}" height="{int(0.16*H)}" fill="url(#{gid}t)"/>')
+    rects.append(f'<rect x="{xo}" y="{int(0.86*H)}" width="{W}" height="{int(0.14*H)}" fill="url(#{gid}b)"/>')
+    return "\n".join(defs), "\n".join(rects)
 
 def build_svg(slides_data, out_path, logo_path):
     total = len(slides_data)
     W = CANVAS_W * total; H = CANVAS_H
     logo_uri = _img_data_uri(logo_path) if logo_path else None
-    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">']
+    defs_all, parts = [], []
     for idx, s in enumerate(slides_data):
         xo = idx * CANVAS_W
+        # foto BERSIH (tanpa masking dibakar) -> masking ditaruh sbg vektor
+        photo = s.get("clean_path") or s["image_path"]
         parts.append(f'<image x="{xo}" y="0" width="{CANVAS_W}" height="{H}" '
-                     f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(s["image_path"])}"/>')
+                     f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(photo)}"/>')
+        # masking vektor (cuma utk slide foto biasa; CTA latar sudah gelap)
+        if s.get("kind") != "cta":
+            d, r = _scrim_svg(s.get("zone", "bottom"), xo, idx)
+            defs_all.append(d); parts.append(r)
         if logo_uri:
             parts.append(f'<image x="{xo + int(0.06*CANVAS_W)}" y="{int(0.05*H)}" '
                          f'height="{int(0.05*H)}" href="{logo_uri}"/>')
@@ -771,9 +818,11 @@ def build_svg(slides_data, out_path, logo_path):
             parts.append(f'<text x="{px+pw//2}" y="{py+int(ph*0.66)}" text-anchor="middle" '
                          f'font-family="{_svg_escape(BODY_FONT)}, Arial, sans-serif" '
                          f'font-size="26" font-weight="700" fill="#{ACCENT_COLOR}">{_svg_escape(CTA_TEXT)}</text>')
-    parts.append('</svg>')
+    header = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
+              f'viewBox="0 0 {W} {H}">')
+    defs = "<defs>\n" + "\n".join(d for d in defs_all if d) + "\n</defs>" if defs_all else ""
     with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(parts))
+        f.write(header + "\n" + defs + "\n" + "\n".join(parts) + "\n</svg>")
     return out_path
 
 
@@ -844,7 +893,8 @@ def process_page(page, workdir):
             render_cta_full(bg, cta_text, prev_path)       # preview penuh buat Telegram
             preview_paths.append(prev_path)
             slides_data.append({"kind": "cta", "cta_text": cta_text, "headline": "", "body": "",
-                                "image_path": img_path, "index": i, "total": total, "zone": "bottom"})
+                                "image_path": img_path, "clean_path": img_path,
+                                "index": i, "total": total, "zone": "bottom"})
             credits.append(f"Slide {i}: (slide CTA — mockup HP + kotak ungu)")
             continue
 
@@ -860,11 +910,14 @@ def process_page(page, workdir):
             credits.append(f"Slide {i}: (background netral — gambar '{q}' tak ditemukan)")
         base = film_grade(crop_canvas(im))
         zone = "bottom" if i == 1 else analyze_zone(base)   # slide 1 = cover (bawah)
+        clean_path = os.path.join(workdir, f"clean_{i}.png")
+        base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
         img_path = os.path.join(workdir, f"slide_{i}.png")
-        bake_scrim(base, zone, img_path)
+        bake_scrim(base, zone, img_path)                    # versi gelap utk preview & .pptx
         preview_paths.append(img_path)
         slides_data.append({"kind": "normal", "headline": headline, "body": body,
-                            "image_path": img_path, "index": i, "total": total, "zone": zone})
+                            "image_path": img_path, "clean_path": clean_path,
+                            "index": i, "total": total, "zone": zone})
 
     safe_name = re.sub(r"[^\w\- ]", "", title).strip().replace(" ", "_")[:40] or "desain"
     logo_path = download_logo_path()
