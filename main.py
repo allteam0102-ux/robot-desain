@@ -99,8 +99,8 @@ UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")   # opsional (ut
 
 TITLE_PROPERTY   = env("TITLE_PROPERTY", "Judul")
 STATUS_PROPERTY  = env("STATUS_PROPERTY", "Status")
-FORMAT_PROPERTY  = env("FORMAT_PROPERTY", "Format")
-CONTENT_PROPERTY = env("CONTENT_PROPERTY", "Konten")
+FORMAT_PROPERTY  = env("FORMAT_PROPERTY", "Bentuk Konten")
+CONTENT_PROPERTY = env("CONTENT_PROPERTY", "Isi Konten")
 KEYWORD_PROPERTY = env("KEYWORD_PROPERTY", "Kata Kunci Gambar")
 
 STATUS_READY = env("STATUS_READY", "Siap Desain")
@@ -144,33 +144,46 @@ NOTION_HEADERS = {
 
 def notion_find_ready():
     url = f"{NOTION_BASE}/databases/{NOTION_DATABASE_ID}/query"
-    if STATUS_TYPE == "status":
-        flt = {"property": STATUS_PROPERTY, "status": {"equals": STATUS_READY}}
-    else:
-        flt = {"property": STATUS_PROPERTY, "select": {"equals": STATUS_READY}}
-    resp = requests.post(url, headers=NOTION_HEADERS, json={"filter": flt}, timeout=60)
-    if resp.status_code != 200:
-        raise SystemExit(f"[NOTION ERROR] {resp.status_code}: {resp.text}")
-    return resp.json().get("results", [])
+    order = ["status", "select"] if STATUS_TYPE == "status" else ["select", "status"]
+    last = None
+    for stype in order:   # coba kedua tipe (Status vs Select) biar nggak perlu setel manual
+        flt = {"property": STATUS_PROPERTY, stype: {"equals": STATUS_READY}}
+        resp = requests.post(url, headers=NOTION_HEADERS, json={"filter": flt}, timeout=60)
+        if resp.status_code == 200:
+            return resp.json().get("results", [])
+        last = resp
+    raise SystemExit(f"[NOTION ERROR] {getattr(last,'status_code','?')}: {getattr(last,'text','')}")
+
+def notion_get_page(page_id):
+    """Ambil ulang 1 halaman Notion by ID (buat auto-revisi)."""
+    try:
+        r = requests.get(f"{NOTION_BASE}/pages/{page_id}", headers=NOTION_HEADERS, timeout=60)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        print("  ! notion_get_page gagal:", e)
+    return None
 
 def notion_set_status(page_id, status_value, note=None, icon_emoji=None):
     url = f"{NOTION_BASE}/pages/{page_id}"
-    if STATUS_TYPE == "status":
-        props = {STATUS_PROPERTY: {"status": {"name": status_value}}}
-    else:
-        props = {STATUS_PROPERTY: {"select": {"name": status_value}}}
-    props_with_note = dict(props)
-    if note:
-        props_with_note["Catatan"] = {"rich_text": [{"text": {"content": note[:1900]}}]}
-    body = {"properties": props_with_note}
-    if icon_emoji:
-        body["icon"] = {"type": "emoji", "emoji": icon_emoji}
-    r = requests.patch(url, headers=NOTION_HEADERS, json=body, timeout=60)
-    if r.status_code != 200:
+    order = ["status", "select"] if STATUS_TYPE == "status" else ["select", "status"]
+    for stype in order:   # coba kedua tipe; berhenti kalau salah satu berhasil
+        props = {STATUS_PROPERTY: {stype: {"name": status_value}}}
+        body = {"properties": dict(props)}
+        if note:
+            body["properties"]["Catatan"] = {"rich_text": [{"text": {"content": note[:1900]}}]}
+        if icon_emoji:
+            body["icon"] = {"type": "emoji", "emoji": icon_emoji}
+        r = requests.patch(url, headers=NOTION_HEADERS, json=body, timeout=60)
+        if r.status_code == 200:
+            return
+        # kalau gagal (mis. kolom 'Catatan' nggak ada), ulangi tanpa catatan
         body2 = {"properties": props}
         if icon_emoji:
             body2["icon"] = {"type": "emoji", "emoji": icon_emoji}
-        requests.patch(url, headers=NOTION_HEADERS, json=body2, timeout=60)
+        r2 = requests.patch(url, headers=NOTION_HEADERS, json=body2, timeout=60)
+        if r2.status_code == 200:
+            return
 
 def _plain_text(rich_list):
     return "".join(part.get("plain_text", "") for part in (rich_list or []))
@@ -204,7 +217,8 @@ def get_title(props):
 # ======================================================================
 def split_slides(content_text):
     raw = (content_text or "").replace("\r\n", "\n").replace("\r", "\n")
-    blocks = re.split(r"(?m)^\s*(?:[-–—]{2,}|[–—])\s*$", raw)
+    # Pemisah slide didukung: baris 'Slide 1/2/3...' ATAU baris '---' / dash.
+    blocks = re.split(r"(?mi)^\s*(?:slide\s*\d+\s*[:.)\-]?|[-–—]{2,}|[–—])\s*$", raw)
     return [b.strip() for b in blocks if b.strip()]
 
 def headline_and_body(block):
@@ -912,13 +926,16 @@ def tg_answer_callback(cb_id, text=""):
 # ======================================================================
 DEFAULT_MEMORY = {
     "preferences": {"head_scale": 1.0, "body_scale": 1.0, "scrim": 1.0, "soft": 0.0},
-    "pending": {},        # token -> {title, ts}
+    "pending": {},        # token -> {title, page_id, ts, revision}
     "resolved": [],       # token yang sudah dinilai (anti dobel)
     "awaiting_text": None,  # token yang menunggu alasan ketik
+    "revise_queue": {},   # page_id -> {title, revision, reasons[]} konten yg minta direvisi
     "log": [],            # riwayat {ts, title, status, reason}
     "stats": {"approved": 0, "rejected": 0, "weekly": []},
     "tg_offset": 0,
 }
+
+MAX_REVISI = int(os.environ.get("MAX_REVISI") or 10)   # batas aman auto-revisi per konten
 
 # tombol alasan saat Reject: (label, kode)
 REASON_BUTTONS = [
@@ -977,6 +994,21 @@ def prefs_summary(prefs):
             f"body {int(prefs['body_scale']*100)}%, overlay {int(prefs['scrim']*100)}%, "
             f"soft +{int(prefs['soft']*100)}%.")
 
+def _queue_revision(mem, rec, reason_label):
+    """Masukkan konten ke antrian revisi (biar run berikutnya di-generate ulang)."""
+    page_id = (rec or {}).get("page_id")
+    if not page_id:
+        return False
+    rev = (rec or {}).get("revision", 0)
+    q = mem.setdefault("revise_queue", {})
+    entry = q.get(page_id) or {"title": (rec or {}).get("title", "desain"), "revision": rev, "reasons": []}
+    entry["title"] = (rec or {}).get("title", entry.get("title", "desain"))
+    entry["revision"] = rev + 1
+    entry["reasons"].append(reason_label)
+    entry["reasons"] = entry["reasons"][-8:]
+    q[page_id] = entry
+    return True
+
 def _mark_resolved(mem, tok):
     res = mem.setdefault("resolved", [])
     if tok not in res:
@@ -1006,9 +1038,16 @@ def process_feedback(mem):
                     rec = mem["pending"].pop(tok, {"title": "?"})
                     mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
                                        "status": "rejected", "reason": "ketik: " + text[:120]})
+                    # perbarui alasan di antrian revisi (ganti placeholder dgn teks asli)
+                    pid = rec.get("page_id")
+                    q = mem.get("revise_queue", {})
+                    if pid and pid in q:
+                        q[pid]["reasons"] = (q[pid].get("reasons", [])[:-1]) + ["ketik: " + text[:80]]
+                    else:
+                        _queue_revision(mem, rec, "ketik: " + text[:80])
                     mem["awaiting_text"] = None
                     processed += 1
-                    tg_message(f"📝 Alasan dicatat: “{text[:120]}”. Makasih, bro.")
+                    tg_message(f"📝 Alasan dicatat: “{text[:120]}”. Gw revisi ya.")
                 continue
             if low in ("stats", "/stats", "statistik"):
                 a = mem["stats"]["approved"]; r = mem["stats"]["rejected"]; tot = a + r
@@ -1036,19 +1075,23 @@ def process_feedback(mem):
         if tok and tok in mem.get("resolved", []):
             tg_answer_callback(cb_id, "Sudah dinilai sebelumnya 👍"); continue
 
-        if kind == "a":                      # approve (1x pencet)
+        if kind == "a":                      # approve (1x pencet) -> FINAL
             rec = mem["pending"].pop(tok, {"title": "?"})
             mem["stats"]["approved"] += 1
             _mark_resolved(mem, tok); processed += 1
+            pid = rec.get("page_id")
+            if pid:
+                mem.get("revise_queue", {}).pop(pid, None)   # batal revisi, udah oke
             mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
                                "status": "approved", "reason": ""})
             tg_answer_callback(cb_id, "✅ Disimpan sebagai contoh bagus!")
-        elif kind == "rs":                   # reject + alasan (1x pencet) -> knob LANGSUNG dipakai
+        elif kind == "rs":                   # reject + alasan (1x pencet) -> knob + antri revisi
             code = parts[2] if len(parts) > 2 else ""
             if code == "other":
                 mem["stats"]["rejected"] += 1
                 mem["awaiting_text"] = tok
                 _mark_resolved(mem, tok); processed += 1
+                _queue_revision(mem, mem["pending"].get(tok, {}), "alasan lain (nunggu ketik)")
                 tg_answer_callback(cb_id, "Oke, ketik alasannya di chat ya.")
                 tg_message("✍️ Tulis alasan singkatnya di sini (1 pesan).")
             else:
@@ -1056,10 +1099,11 @@ def process_feedback(mem):
                 desc = apply_reason(prefs, code)   # <-- berdasarkan kode, bukan pending
                 rec = mem["pending"].pop(tok, {"title": "?"})
                 _mark_resolved(mem, tok); processed += 1
+                _queue_revision(mem, rec, REASON_LABEL.get(code, code))
                 mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
                                    "status": "rejected", "reason": REASON_LABEL.get(code, code)})
                 changed.append(desc)
-                tg_answer_callback(cb_id, f"Paham. {desc}.")
+                tg_answer_callback(cb_id, f"Paham. {desc}. Gw revisi ya.")
         elif kind == "r":                    # kompat tombol lama (Reject 2-langkah) -> abaikan halus
             tg_answer_callback(cb_id, "Pakai tombol alasan di desain baru ya 🙏")
 
@@ -1085,10 +1129,15 @@ def apply_prefs_to_globals(mem):
 # ======================================================================
 # 8. PROSES SATU KONTEN
 # ======================================================================
-def process_page(page, workdir, mem=None):
+def process_page(page, workdir, mem=None, revision=None):
     props = page["properties"]
+    page_id = page.get("id", "")
     title = get_title(props) or "Tanpa Judul"
-    fmt = read_property(props, FORMAT_PROPERTY, "select") or "Single Post"
+    # 'Bentuk Konten' bisa tipe Select/Status/Teks -> baca fleksibel; default Carousel (aman, nggak motong slide)
+    fmt = (read_property(props, FORMAT_PROPERTY, "select")
+           or read_property(props, FORMAT_PROPERTY, "status")
+           or read_property(props, FORMAT_PROPERTY, "rich_text")
+           or "Carousel")
     content = read_property(props, CONTENT_PROPERTY, "rich_text")
     keywords = read_property(props, KEYWORD_PROPERTY, "rich_text")
 
@@ -1185,8 +1234,10 @@ def process_page(page, workdir, mem=None):
 
     # ---- tombol penilaian (1x pencet langsung selesai) utk sistem belajar ----
     if LEARN_ENABLED and mem is not None:
+        rev_n = (revision or {}).get("revision", 0)
         token = secrets.token_hex(4)
-        mem["pending"][token] = {"title": title, "ts": int(time.time())}
+        mem["pending"][token] = {"title": title, "page_id": page_id,
+                                 "ts": int(time.time()), "revision": rev_n}
         rows = [[("✅ Approve (oke!)", f"a:{token}")]]
         rr = []
         for label, code in REASON_BUTTONS:
@@ -1196,8 +1247,12 @@ def process_page(page, workdir, mem=None):
                 rows.append(rr); rr = []
         if rr:
             rows.append(rr)
-        tg_buttons(f"Nilai desain '{title}' 👇\n"
-                   f"✅ kalau udah oke — atau langsung pencet alasannya kalau ada yang kurang pas:", rows)
+        head = f"Nilai desain '{title}' 👇"
+        if rev_n:
+            prev = ", ".join((revision or {}).get("reasons", [])[-4:]) or "-"
+            head = (f"🔄 REVISI ke-{rev_n} dari '{title}' 👇\n"
+                    f"⚠️ Catatan dari sebelumnya: {prev}")
+        tg_buttons(head + "\n✅ kalau udah oke — atau pencet alasannya kalau masih kurang pas:", rows)
 
     return total
 
@@ -1218,6 +1273,28 @@ def main():
         apply_prefs_to_globals(mem)
         print("  " + prefs_summary(mem["preferences"]))
 
+    # 3) AUTO-REVISI: generate ulang konten yg tadi di-reject (sampai di-approve)
+    if LEARN_ENABLED and mem.get("revise_queue"):
+        for pid in list(mem["revise_queue"].keys()):
+            info = mem["revise_queue"].pop(pid)   # pindah dari antrian -> jadi pending lagi
+            if info.get("revision", 1) > MAX_REVISI:
+                tg_message(f"🛑 '{info.get('title','desain')}' udah direvisi {MAX_REVISI}x tapi belum pas. "
+                           f"Mungkin lebih enak kamu kasih contoh manual biar gw niru. Gw stop auto-revisi yg ini dulu.")
+                continue
+            page = notion_get_page(pid)
+            if not page:
+                tg_message(f"⚠️ Gagal ambil ulang '{info.get('title','desain')}' dari Notion buat revisi.")
+                continue
+            wd = tempfile.mkdtemp()
+            try:
+                tg_message(f"🔄 Merevisi '{info.get('title','desain')}' (revisi ke-{info.get('revision',1)})…")
+                process_page(page, wd, mem, revision=info)
+            except Exception as e:
+                print("  x revisi gagal:", e); traceback.print_exc()
+                tg_message(f"⚠️ Revisi '{info.get('title','desain')}' gagal: {type(e).__name__}. Gw coba lagi next.")
+                mem["revise_queue"][pid] = info   # balikin ke antrian biar dicoba lagi
+
+    # 4) konten BARU berstatus "Siap Desain"
     pages = notion_find_ready()
     print(f"Ditemukan {len(pages)} konten berstatus '{STATUS_READY}'.")
     if not pages:
