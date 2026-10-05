@@ -11,6 +11,11 @@ on:
 permissions:
   contents: write
 
+# cegah run numpuk: cukup 1 yang jalan, run antrian lama otomatis dibatalin
+concurrency:
+  group: nikah-bot
+  cancel-in-progress: false
+
 jobs:
   jalankan:
     runs-on: ubuntu-latest
