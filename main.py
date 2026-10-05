@@ -716,51 +716,64 @@ def _est_w(s, size):
 
 def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=False, gap=1.25):
     """
-    SATU <text> per PARAGRAF (biar di Figma jadi 1 layer teks yang gampang
-    diedit). Pemisahan baris (wrap) pakai <tspan dy=...> di dalam <text> yang
-    sama, bukan <text> terpisah. Warna stabilo tetap jalan lewat tspan fill.
-    'x' = titik acuan: kiri (start), tengah (middle), kanan (end).
+    Teks OTOMATIS TURUN BARIS (wrap) biar PAS di dalam frame (nggak meleber).
+    Tiap baris hasil wrap = satu <text> (anchor start, x digeser manual utk
+    center/right). Stabilo (==) & miring (_) tetap jalan inline.
     """
     weight = "700" if bold else "400"
-    # SATU <text> untuk SELURUH blok teks ini (headline = 1 blok, body = 1 blok).
-    # Baris (Enter di Notion) dipisah pakai NEWLINE ASLI di dalam satu elemen,
-    # TANPA <tspan> ber-posisi. Alasan: Figma memecah tiap <tspan> ber-x/-dy jadi
-    # LAYER terpisah; dgn newline asli, Figma menyatukannya jadi SATU text box
-    # berisi baris-barisnya. Warna stabilo tetap inline (tidak bikin layer baru).
-    raw_lines = text.split("\n")
-    nonempty = [l for l in raw_lines if l.strip()]
-    if not nonempty:
-        return ""
-    def est_line(line):
-        plain = "".join(s for s, _, _ in (rich_segments(line) if highlight else [(line, False, False)]))
-        return _est_w(plain, size)
-    maxw = max(est_line(l) for l in nonempty)
-    if anchor == "middle":
-        lx = int(x - maxw / 2)
-    elif anchor == "end":
-        lx = int(x - maxw)
-    else:
-        lx = int(x)
-    base = y + size
-    parts = []
-    for li, line in enumerate(raw_lines):
-        if li > 0:
-            parts.append("\n")   # newline asli -> jadi line break di dalam 1 text box Figma
-        for s, is_hl, is_it in (rich_segments(line) if highlight else [(line, False, False)]):
-            if s == "":
-                continue
-            tok = _svg_escape(s)
-            if is_hl:
-                parts.append(f'<tspan fill="#{ACCENT_COLOR}">{tok}</tspan>')
-            elif is_it:
-                parts.append(f'<tspan font-style="italic">{tok}</tspan>')
+    # huruf tebal lebih lebar -> pakai faktor lebih besar biar wrap lebih awal (nggak meleber)
+    char_factor = 0.63 if bold else 0.56
+    max_chars = max(6, int(width / (size * char_factor)))
+    lh = int(size * gap)
+
+    def words_of(line):
+        res = []
+        for s, hl, it in (rich_segments(line) if highlight else [(line, False, False)]):
+            for w in s.split(" "):
+                if w != "":
+                    res.append((w, hl, it))
+        return res
+
+    out = []
+    yy = y
+    for para in text.split("\n"):
+        ws = words_of(para)
+        if not ws:
+            yy += lh; continue
+        # bagi jadi beberapa baris sesuai lebar frame
+        vlines, cur, cur_len = [], [], 0
+        for w, hl, it in ws:
+            add = len(w) + (1 if cur else 0)
+            if cur and cur_len + add > max_chars:
+                vlines.append(cur); cur, cur_len = [], 0; add = len(w)
+            cur.append((w, hl, it)); cur_len += add
+        if cur:
+            vlines.append(cur)
+        for vl in vlines:
+            line_str = " ".join(w for w, _, _ in vl)
+            lw = _est_w(line_str, size)
+            if anchor == "middle":
+                lx = int(x - lw / 2)
+            elif anchor == "end":
+                lx = int(x - lw)
             else:
-                parts.append(tok)
-    content = "".join(parts)
-    return (f'<text x="{lx}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
-            f'style="white-space:pre" fill="#FFFFFF" '
-            f'font-family="{_svg_escape(font)}, Arial, sans-serif" '
-            f'font-size="{size}" font-weight="{weight}">{content}</text>')
+                lx = int(x)
+            frag = ""
+            for k, (w, hl, it) in enumerate(vl):
+                prefix = " " if k > 0 else ""
+                tok = _svg_escape(prefix + w)
+                if hl:
+                    frag += f'<tspan fill="#{ACCENT_COLOR}">{tok}</tspan>'
+                elif it:
+                    frag += f'<tspan font-style="italic">{tok}</tspan>'
+                else:
+                    frag += tok
+            base = yy + size
+            out.append(f'<text x="{lx}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
+                       f'fill="#FFFFFF" font-family="{_svg_escape(font)}, Arial, sans-serif" '
+                       f'font-size="{size}" font-weight="{weight}">{frag}</text>')
+            yy += lh
+    return "\n".join(out)
 
 
 # ---------- masking versi VEKTOR (editable di Figma) ----------
