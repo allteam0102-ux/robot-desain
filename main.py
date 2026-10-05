@@ -1069,6 +1069,32 @@ def _latest_pending(mem):
             best = (tok, rec)
     return best
 
+def ai_image_keywords(slide_texts):
+    """1 panggilan Gemini -> kata kunci FOTO (Inggris, aesthetic) per slide. None kalau gagal."""
+    if not AI_CHAT_ENABLED or not slide_texts:
+        return None
+    joined = "\n".join(f"{i+1}. {(t or '')[:160]}" for i, t in enumerate(slide_texts))
+    prompt = (
+        "Kamu art director untuk brand konseling pernikahan (gaya editorial/aesthetic luar negeri, nuansa sinematik & soft).\n"
+        "Untuk TIAP slide di bawah, buat 1 kata kunci pencarian FOTO STOK dalam BAHASA INGGRIS (3-5 kata), "
+        "fokus ke suasana/visual (bukan terjemahan harfiah teks), hindari tulisan/logo, utamakan natural light & tone lembut.\n"
+        "Balas HANYA JSON array of string, urut sesuai nomor, panjang PERSIS sama dengan jumlah slide.\n\n" + joined)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    body = {"contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.4, "responseMimeType": "application/json"}}
+    try:
+        r = requests.post(url, json=body, timeout=45)
+        if r.status_code != 200:
+            print(f"    ! Gemini keyword {r.status_code}: {r.text[:160]}")
+            return None
+        raw = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        arr = json.loads(raw)
+        if isinstance(arr, list) and arr:
+            return [str(x) for x in arr]
+    except Exception as e:
+        print("    ! Gemini keyword gagal:", e)
+    return None
+
 def _queue_revision(mem, rec, reason_label):
     """Masukkan konten ke antrian revisi (biar run berikutnya di-generate ulang)."""
     page_id = (rec or {}).get("page_id")
@@ -1248,6 +1274,10 @@ def process_page(page, workdir, mem=None, revision=None):
     if "single" in fmt.lower():
         slide_blocks = slide_blocks[:1]
     keyword_blocks = split_slides(keywords)
+    # kata kunci gambar pintar (AI) — 1 panggilan utk semua slide; None kalau AI mati/gagal
+    ai_kws = ai_image_keywords(slide_blocks)
+    if ai_kws:
+        print(f"  [AI keywords: {ai_kws}]")
 
     print(f"  -> '{title}' | {fmt} | {len(slide_blocks)} slide")
 
@@ -1271,7 +1301,14 @@ def process_page(page, workdir, mem=None, revision=None):
             continue
 
         headline, body = headline_and_body(block)
-        q = keyword_for(i - 1, keyword_blocks, headline, body)
+        # prioritas kata kunci: kolom "Kata Kunci Gambar" > AI (Inggris aesthetic) > headline/body
+        explicit = keyword_blocks[i - 1].strip() if (i - 1) < len(keyword_blocks) else ""
+        if explicit:
+            q = keyword_for(i - 1, keyword_blocks, headline, body)
+        elif ai_kws and (i - 1) < len(ai_kws) and ai_kws[i - 1].strip():
+            q = ai_kws[i - 1].strip()
+        else:
+            q = keyword_for(i - 1, keyword_blocks, headline, body)
         data, credit = image_pick(q, used_ids)
         if data:
             im = Image.open(io.BytesIO(data)).convert("RGB")
