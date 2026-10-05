@@ -31,7 +31,7 @@
       "revision": 0
     }
   },
-  "awaiting_text": null,
+  "awaiting_text": "a95e185f",
   "log": [
     {
       "ts": 1791167212,
@@ -42,13 +42,14 @@
   ],
   "stats": {
     "approved": 0,
-    "rejected": 1,
+    "rejected": 2,
     "weekly": []
   },
-  "tg_offset": 669680855,
+  "tg_offset": 669680860,
   "resolved": [
-    "76b6c4c4"
+    "76b6c4c4",
+    "a95e185f"
   ],
-  "_last_processed": 0,
+  "_last_processed": 1,
   "revise_queue": {}
 }
