@@ -24,20 +24,32 @@
       "ts": 1791167267,
       "revision": 1
     },
-    "a95e185f": {
+    "3e0d7e93": {
       "title": "28. MC KONSELING",
       "page_id": "3d1d3753-c100-806f-9cc6-fac6fa15d597",
-      "ts": 1791226908,
+      "ts": 1791227422,
+      "revision": 1
+    },
+    "6cb6e384": {
+      "title": "28. MC KONSELING",
+      "page_id": "3d1d3753-c100-806f-9cc6-fac6fa15d597",
+      "ts": 1791227488,
       "revision": 0
     }
   },
-  "awaiting_text": "a95e185f",
+  "awaiting_text": null,
   "log": [
     {
       "ts": 1791167212,
       "title": "25. PC KONSELING",
       "status": "rejected",
       "reason": "ketik: gambar kurang aesthetic dan tulisan kurang rapih"
+    },
+    {
+      "ts": 1791227351,
+      "title": "28. MC KONSELING",
+      "status": "rejected",
+      "reason": "ketik: gambar lebih ke pasangan cewe dan cowok, atau yang cewek sendirian juga nggak papa"
     }
   ],
   "stats": {
@@ -45,7 +57,7 @@
     "rejected": 2,
     "weekly": []
   },
-  "tg_offset": 669680860,
+  "tg_offset": 669680861,
   "resolved": [
     "76b6c4c4",
     "a95e185f"
