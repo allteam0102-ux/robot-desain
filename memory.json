@@ -18,22 +18,31 @@
       "title": "konten 1",
       "ts": 1791050165
     },
-    "76b6c4c4": {
+    "3d99c477": {
       "title": "25. PC KONSELING",
       "page_id": "3d1d3753-c100-806c-b112-d2b547094e25",
-      "ts": 1791167049,
-      "revision": 0
+      "ts": 1791167267,
+      "revision": 1
     }
   },
   "awaiting_text": null,
-  "log": [],
+  "log": [
+    {
+      "ts": 1791167212,
+      "title": "25. PC KONSELING",
+      "status": "rejected",
+      "reason": "ketik: gambar kurang aesthetic dan tulisan kurang rapih"
+    }
+  ],
   "stats": {
     "approved": 0,
-    "rejected": 0,
+    "rejected": 1,
     "weekly": []
   },
-  "tg_offset": 669680852,
-  "resolved": [],
-  "_last_processed": 0,
+  "tg_offset": 669680855,
+  "resolved": [
+    "76b6c4c4"
+  ],
+  "_last_processed": 2,
   "revise_queue": {}
 }
