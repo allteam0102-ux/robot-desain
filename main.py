@@ -1007,6 +1007,68 @@ def prefs_summary(prefs):
             f"body {int(prefs['body_scale']*100)}%, overlay {int(prefs['scrim']*100)}%, "
             f"soft +{int(prefs['soft']*100)}%.")
 
+
+# ---------- CHAT AI: ngerti perintah revisi bebas (Gemini, gratis) ----------
+GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL    = os.environ.get("GEMINI_MODEL") or "gemini-2.0-flash"
+AI_CHAT_ENABLED = (os.environ.get("AI_CHAT_ENABLED") or "true").lower() == "true" and bool(GEMINI_API_KEY)
+
+AI_PROMPT = """Kamu asisten desain untuk bot konten Instagram (brand Nikah Institute).
+User memberi perintah/feedback (bahasa Indonesia atau Inggris) untuk merevisi sebuah desain.
+Terjemahkan jadi penyesuaian angka. Setelan sekarang (1.0 = normal):
+- head_scale: ukuran JUDUL (batas 0.7-1.3)
+- body_scale: ukuran teks BODY (batas 0.7-1.3)
+- scrim: kegelapan overlay di belakang teks (batas 0.6-1.6; naik = lebih gelap = teks lebih terbaca)
+- soft: kesan film/lembut pada gambar (batas 0.0-0.4; naik = lebih lembut/pudar; turun = lebih cerah/tajam)
+Catatan: kalau user minta ganti/ubah foto, cukup set action "revise" (foto otomatis diganti baru saat revisi).
+Balas HANYA JSON valid, tanpa teks lain:
+{"head_scale_delta": <angka -0.12..0.12>, "body_scale_delta": <angka>, "scrim_delta": <angka>, "soft_delta": <angka>, "note": "<ringkasan singkat dalam bahasa Indonesia, maks 12 kata>", "action": "revise" atau "none"}
+Kalau pesan BUKAN instruksi revisi desain (misal cuma sapaan/ngobrol), set action "none" dan semua delta 0.
+Pesan user: "%s" """
+
+def ai_parse_command(text):
+    """Pakai Gemini buat ubah kalimat bebas jadi penyesuaian angka. None kalau gagal/mati."""
+    if not AI_CHAT_ENABLED:
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    body = {"contents": [{"parts": [{"text": AI_PROMPT % text[:400]}]}],
+            "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}}
+    try:
+        r = requests.post(url, json=body, timeout=45)
+        if r.status_code != 200:
+            print(f"    ! Gemini {r.status_code}: {r.text[:200]}")
+            return None
+        raw = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(raw)
+    except Exception as e:
+        print("    ! Gemini parse gagal:", e)
+        return None
+
+def apply_ai(prefs, data):
+    """Terapkan delta dari AI (dibatasi aman). Kembalikan daftar yg berubah."""
+    changed = []
+    plan = [("head_scale_delta", "head_scale", 0.7, 1.3),
+            ("body_scale_delta", "body_scale", 0.7, 1.3),
+            ("scrim_delta", "scrim", 0.6, 1.6),
+            ("soft_delta", "soft", 0.0, 0.4)]
+    for key, knob, lo, hi in plan:
+        try:
+            d = float(data.get(key, 0) or 0)
+        except Exception:
+            d = 0.0
+        d = _clamp(d, -0.15, 0.15)   # batasi per-perintah biar nggak loncat jauh
+        if abs(d) >= 0.01:
+            prefs[knob] = _clamp(prefs[knob] + d, lo, hi)
+            changed.append(knob)
+    return changed
+
+def _latest_pending(mem):
+    best = None
+    for tok, rec in mem.get("pending", {}).items():
+        if best is None or rec.get("ts", 0) > best[1].get("ts", 0):
+            best = (tok, rec)
+    return best
+
 def _queue_revision(mem, rec, reason_label):
     """Masukkan konten ke antrian revisi (biar run berikutnya di-generate ulang)."""
     page_id = (rec or {}).get("page_id")
@@ -1073,6 +1135,31 @@ def process_feedback(mem):
                 mem["preferences"] = dict(DEFAULT_MEMORY["preferences"])
                 prefs = mem["preferences"]
                 tg_message("🔄 Setelan belajar direset ke awal (netral). Statistik tetap tersimpan.")
+                continue
+            # ---- CHAT AI: perintah revisi bebas (ketik kalimat biasa) ----
+            if text:
+                data = ai_parse_command(text)
+                if data and data.get("action") == "none":
+                    tg_message("Oke, dicatat 🙂 Kalau mau gw revisi, kasih tau yang perlu diubah ya "
+                               "(misal: “judul kekecilan”, “overlay kurang gelap”, “ganti foto lebih cerah”).")
+                    continue
+                note = (data or {}).get("note") or text[:80]
+                ch = apply_ai(prefs, data) if data else []
+                latest = _latest_pending(mem)
+                if latest:
+                    tok, rec = latest
+                    _queue_revision(mem, rec, "chat: " + note)
+                    mem["pending"].pop(tok, None); _mark_resolved(mem, tok)
+                    mem["stats"]["rejected"] += 1
+                    extra = ("\n" + prefs_summary(prefs)) if ch else ""
+                    tail = "" if data else " (AI lagi nggak aktif, jadi gw revisi dgn foto baru aja)"
+                    tg_message(f"🧠 Paham: {note}. Gw revisi '{rec.get('title','desain')}' ya{tail}.{extra}")
+                else:
+                    if ch:
+                        tg_message(f"🧠 Paham: {note}. Setelan disesuaikan, kepakai di desain berikutnya.\n{prefs_summary(prefs)}")
+                    else:
+                        tg_message("Belum ada desain yang bisa direvisi. Kirim konten dulu ya 🙂")
+                processed += 1
                 continue
             continue
 
@@ -1265,7 +1352,9 @@ def process_page(page, workdir, mem=None, revision=None):
             prev = ", ".join((revision or {}).get("reasons", [])[-4:]) or "-"
             head = (f"🔄 REVISI ke-{rev_n} dari '{title}' 👇\n"
                     f"⚠️ Catatan dari sebelumnya: {prev}")
-        tg_buttons(head + "\n✅ kalau udah oke — atau pencet alasannya kalau masih kurang pas:", rows)
+        tip = ("\n💬 atau ketik aja perintahmu (misal: “judul kekecilan, foto lebih cerah”)"
+               if AI_CHAT_ENABLED else "")
+        tg_buttons(head + "\n✅ kalau udah oke — atau pencet alasannya kalau masih kurang pas:" + tip, rows)
 
     return total
 
