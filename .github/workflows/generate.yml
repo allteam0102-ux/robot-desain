@@ -37,6 +37,7 @@ jobs:
           STATUS_TYPE: ${{ secrets.STATUS_TYPE }}
           LOGO_URL: ${{ secrets.LOGO_URL }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python main.py
 
       - name: Simpan memori belajar (memory.json)
