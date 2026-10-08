@@ -962,7 +962,6 @@ REASON_BUTTONS = [
     ("Teks susah kebaca", "hard"),
     ("Overlay kegelapan", "dark"),
     ("Gambar kurang aesthetic", "img"),
-    ("Alasan lain (ketik)", "other"),
 ]
 REASON_LABEL = {k: v for v, k in REASON_BUTTONS}
 
@@ -1158,22 +1157,12 @@ def process_feedback(mem):
     for up in updates:
         mem["tg_offset"] = max(mem.get("tg_offset", 0), up.get("update_id", 0))
 
-        # ---- pesan teks: alasan ketik / perintah stats / reset ----
+        # ---- pesan teks: perintah stats / reset / revisi bebas (AI) ----
         msg = up.get("message")
         if msg:
             text = (msg.get("text") or "").strip()
             low = text.lower()
-            if mem.get("awaiting_text"):
-                tok = mem["awaiting_text"]
-                if text:
-                    rec = mem["pending"].pop(tok, {"title": "?"})
-                    mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
-                                       "status": "rejected", "reason": "ketik: " + text[:120]})
-                    _queue_revision(mem, rec, "ketik: " + text[:80])
-                    mem["awaiting_text"] = None
-                    processed += 1
-                    tg_message(f"📝 Alasan dicatat: “{text[:120]}”. Gw revisi ya.")
-                continue
+            mem["awaiting_text"] = None   # fitur lama nggak dipakai lagi
             if low in ("stats", "/stats", "statistik"):
                 a = mem["stats"]["approved"]; r = mem["stats"]["rejected"]; tot = a + r
                 rate = int(100 * a / tot) if tot else 0
@@ -1248,14 +1237,10 @@ def process_feedback(mem):
                                "status": "approved", "reason": ""})
             tg_answer_callback(cb_id, "✅ Disimpan sebagai contoh bagus!")
         elif kind == "rs":                   # reject + alasan (1x pencet) -> knob + antri revisi
-            if code == "other":
-                mem["stats"]["rejected"] += 1
-                mem["awaiting_text"] = tok
-                _mark_resolved(mem, tok); processed += 1
-                ok = _queue_revision(mem, rec, "alasan lain (nunggu ketik)")
-                print(f"  reject(other) pid={rec.get('page_id')} queued={ok}")
-                tg_answer_callback(cb_id, "Oke, ketik alasannya di chat ya.")
-                tg_message("✍️ Tulis alasan singkatnya di sini (1 pesan).")
+            if code == "other":   # tombol lama: sekarang cukup KETIK langsung
+                tg_answer_callback(cb_id, "Ketik aja perintah revisimu langsung ya 🙂")
+                tg_message("💬 Ketik aja apa yang mau diubah (misal: “judul kekecilan, foto lebih cerah”) — "
+                           "langsung gw proses, nggak usah pencet tombol ini.")
             else:
                 mem["stats"]["rejected"] += 1
                 desc = apply_reason(prefs, code)
@@ -1420,8 +1405,7 @@ def process_page(page, workdir, mem=None, revision=None):
         rows = [[("✅ Approve (oke!)", f"a:{token}:{pid_cb}")]]
         rr = []
         for label, code in REASON_BUTTONS:
-            prefix = "✍️ " if code == "other" else "❌ "
-            rr.append((prefix + label, f"rs:{token}:{code}:{pid_cb}"))
+            rr.append(("❌ " + label, f"rs:{token}:{code}:{pid_cb}"))
             if len(rr) == 2:
                 rows.append(rr); rr = []
         if rr:
