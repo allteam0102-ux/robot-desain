@@ -931,7 +931,12 @@ def tg_get_updates(offset):
         return []
 
 def tg_answer_callback(cb_id, text=""):
-    _tg_call("answerCallbackQuery", {"callback_query_id": cb_id, "text": text[:180]}, label="ans")
+    # notif kecil di tombol; kalau gagal (query kedaluwarsa krn batch) abaikan diam-diam
+    try:
+        requests.post(f"{TG_BASE}/answerCallbackQuery",
+                      data={"callback_query_id": cb_id, "text": text[:180]}, timeout=20)
+    except Exception:
+        pass
 
 
 # ======================================================================
@@ -1010,7 +1015,7 @@ def prefs_summary(prefs):
 
 # ---------- CHAT AI: ngerti perintah revisi bebas (Gemini, gratis) ----------
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL    = os.environ.get("GEMINI_MODEL") or "gemini-2.0-flash"
+GEMINI_MODEL    = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
 AI_CHAT_ENABLED = (os.environ.get("AI_CHAT_ENABLED") or "true").lower() == "true" and bool(GEMINI_API_KEY)
 
 AI_PROMPT = """Kamu asisten desain untuk bot konten Instagram (brand Nikah Institute).
@@ -1097,7 +1102,7 @@ def ai_image_keywords(slide_texts):
 
 def _queue_revision(mem, rec, reason_label):
     """Masukkan konten ke antrian revisi (biar run berikutnya di-generate ulang)."""
-    page_id = (rec or {}).get("page_id")
+    page_id = ((rec or {}).get("page_id") or "").replace("-", "")   # normalisasi kunci
     if not page_id:
         return False
     rev = (rec or {}).get("revision", 0)
@@ -1139,13 +1144,7 @@ def process_feedback(mem):
                     rec = mem["pending"].pop(tok, {"title": "?"})
                     mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
                                        "status": "rejected", "reason": "ketik: " + text[:120]})
-                    # perbarui alasan di antrian revisi (ganti placeholder dgn teks asli)
-                    pid = rec.get("page_id")
-                    q = mem.get("revise_queue", {})
-                    if pid and pid in q:
-                        q[pid]["reasons"] = (q[pid].get("reasons", [])[:-1]) + ["ketik: " + text[:80]]
-                    else:
-                        _queue_revision(mem, rec, "ketik: " + text[:80])
+                    _queue_revision(mem, rec, "ketik: " + text[:80])
                     mem["awaiting_text"] = None
                     processed += 1
                     tg_message(f"📝 Alasan dicatat: “{text[:120]}”. Gw revisi ya.")
@@ -1201,37 +1200,54 @@ def process_feedback(mem):
         if tok and tok in mem.get("resolved", []):
             tg_answer_callback(cb_id, "Sudah dinilai sebelumnya 👍"); continue
 
+        # page_id & code diambil dari DATA TOMBOL (nggak gantung ke pending yg bisa hilang)
+        if kind == "rs":
+            code = parts[2] if len(parts) > 2 else ""
+            pid_cb = parts[3] if len(parts) > 3 else ""
+        else:
+            code = ""
+            pid_cb = parts[2] if len(parts) > 2 else ""
+        pend = mem["pending"].get(tok, {})
+        rec = {"title": pend.get("title", "desain"),
+               "page_id": pid_cb or pend.get("page_id"),
+               "revision": pend.get("revision", 0)}
+
         if kind == "a":                      # approve (1x pencet) -> FINAL
-            rec = mem["pending"].pop(tok, {"title": "?"})
+            mem["pending"].pop(tok, None)
             mem["stats"]["approved"] += 1
             _mark_resolved(mem, tok); processed += 1
-            pid = rec.get("page_id")
-            if pid:
-                mem.get("revise_queue", {}).pop(pid, None)   # batal revisi, udah oke
-            mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
+            pid_norm = (rec.get("page_id") or "").replace("-", "")
+            if pid_norm:
+                mem.get("revise_queue", {}).pop(pid_norm, None)   # batal revisi, udah oke
+            mem["log"].append({"ts": int(time.time()), "title": rec["title"],
                                "status": "approved", "reason": ""})
             tg_answer_callback(cb_id, "✅ Disimpan sebagai contoh bagus!")
         elif kind == "rs":                   # reject + alasan (1x pencet) -> knob + antri revisi
-            code = parts[2] if len(parts) > 2 else ""
             if code == "other":
                 mem["stats"]["rejected"] += 1
                 mem["awaiting_text"] = tok
                 _mark_resolved(mem, tok); processed += 1
-                _queue_revision(mem, mem["pending"].get(tok, {}), "alasan lain (nunggu ketik)")
+                ok = _queue_revision(mem, rec, "alasan lain (nunggu ketik)")
+                print(f"  reject(other) pid={rec.get('page_id')} queued={ok}")
                 tg_answer_callback(cb_id, "Oke, ketik alasannya di chat ya.")
                 tg_message("✍️ Tulis alasan singkatnya di sini (1 pesan).")
             else:
                 mem["stats"]["rejected"] += 1
-                desc = apply_reason(prefs, code)   # <-- berdasarkan kode, bukan pending
-                rec = mem["pending"].pop(tok, {"title": "?"})
+                desc = apply_reason(prefs, code)
+                mem["pending"].pop(tok, None)
                 _mark_resolved(mem, tok); processed += 1
-                _queue_revision(mem, rec, REASON_LABEL.get(code, code))
-                mem["log"].append({"ts": int(time.time()), "title": rec.get("title", "?"),
+                ok = _queue_revision(mem, rec, REASON_LABEL.get(code, code))
+                print(f"  reject({code}) pid={rec.get('page_id')} queued={ok}")
+                mem["log"].append({"ts": int(time.time()), "title": rec["title"],
                                    "status": "rejected", "reason": REASON_LABEL.get(code, code)})
                 changed.append(desc)
                 tg_answer_callback(cb_id, f"Paham. {desc}. Gw revisi ya.")
         elif kind == "r":                    # kompat tombol lama (Reject 2-langkah) -> abaikan halus
             tg_answer_callback(cb_id, "Pakai tombol alasan di desain baru ya 🙏")
+
+    # log diagnostik di console (biar kelihatan apa yg kebaca)
+    print(f"  feedback: {len(updates)} update, {processed} diproses, "
+          f"revise_queue={len(mem.get('revise_queue', {}))}, offset={mem.get('tg_offset')}")
 
     # laporan ke Telegram biar KELIHATAN bot baca feedback
     if processed > 0:
@@ -1373,13 +1389,14 @@ def process_page(page, workdir, mem=None, revision=None):
     if LEARN_ENABLED and mem is not None:
         rev_n = (revision or {}).get("revision", 0)
         token = secrets.token_hex(4)
+        pid_cb = (page_id or "").replace("-", "")     # page_id ditaruh di tombol (anti-hilang)
         mem["pending"][token] = {"title": title, "page_id": page_id,
                                  "ts": int(time.time()), "revision": rev_n}
-        rows = [[("✅ Approve (oke!)", f"a:{token}")]]
+        rows = [[("✅ Approve (oke!)", f"a:{token}:{pid_cb}")]]
         rr = []
         for label, code in REASON_BUTTONS:
             prefix = "✍️ " if code == "other" else "❌ "
-            rr.append((prefix + label, f"rs:{token}:{code}"))
+            rr.append((prefix + label, f"rs:{token}:{code}:{pid_cb}"))
             if len(rr) == 2:
                 rows.append(rr); rr = []
         if rr:
