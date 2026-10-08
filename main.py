@@ -1013,10 +1013,56 @@ def prefs_summary(prefs):
             f"soft +{int(prefs['soft']*100)}%.")
 
 
-# ---------- CHAT AI: ngerti perintah revisi bebas (Gemini, gratis) ----------
+# ---------- OTAK AI: Gemini (utama) + Groq (cadangan). Dua-duanya gratis ----------
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL    = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
-AI_CHAT_ENABLED = (os.environ.get("AI_CHAT_ENABLED") or "true").lower() == "true" and bool(GEMINI_API_KEY)
+GROQ_API_KEY    = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL      = os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"
+AI_CHAT_ENABLED = ((os.environ.get("AI_CHAT_ENABLED") or "true").lower() == "true"
+                   and (bool(GEMINI_API_KEY) or bool(GROQ_API_KEY)))
+
+def _gemini_json(prompt):
+    if not GEMINI_API_KEY:
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    body = {"contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.3, "responseMimeType": "application/json"}}
+    try:
+        r = requests.post(url, json=body, timeout=45)
+        if r.status_code != 200:
+            print(f"    ! Gemini {r.status_code}: {r.text[:120]}")
+            return None
+        return json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+    except Exception as e:
+        print("    ! Gemini gagal:", e); return None
+
+def _groq_json(prompt):
+    if not GROQ_API_KEY:
+        return None
+    try:
+        r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                          headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                          json={"model": GROQ_MODEL, "temperature": 0.3,
+                                "response_format": {"type": "json_object"},
+                                "messages": [{"role": "user", "content": prompt}]},
+                          timeout=45)
+        if r.status_code != 200:
+            print(f"    ! Groq {r.status_code}: {r.text[:120]}")
+            return None
+        return json.loads(r.json()["choices"][0]["message"]["content"])
+    except Exception as e:
+        print("    ! Groq gagal:", e); return None
+
+def ai_json(prompt):
+    """Minta jawaban JSON ke AI: coba Gemini dulu, kalau gagal/ngadat pindah ke Groq."""
+    if not AI_CHAT_ENABLED:
+        return None
+    data = _gemini_json(prompt)
+    if data is None:
+        data = _groq_json(prompt)   # cadangan pas Gemini 503/limit
+        if data is not None:
+            print("    (pakai Groq sebagai cadangan)")
+    return data
 
 AI_PROMPT = """Kamu asisten desain untuk bot konten Instagram (brand Nikah Institute).
 User memberi perintah/feedback (bahasa Indonesia atau Inggris) untuk merevisi sebuah desain.
@@ -1032,22 +1078,8 @@ Kalau pesan BUKAN instruksi revisi desain (misal cuma sapaan/ngobrol), set actio
 Pesan user: "%s" """
 
 def ai_parse_command(text):
-    """Pakai Gemini buat ubah kalimat bebas jadi penyesuaian angka. None kalau gagal/mati."""
-    if not AI_CHAT_ENABLED:
-        return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    body = {"contents": [{"parts": [{"text": AI_PROMPT % text[:400]}]}],
-            "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}}
-    try:
-        r = requests.post(url, json=body, timeout=45)
-        if r.status_code != 200:
-            print(f"    ! Gemini {r.status_code}: {r.text[:200]}")
-            return None
-        raw = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        return json.loads(raw)
-    except Exception as e:
-        print("    ! Gemini parse gagal:", e)
-        return None
+    """Ubah kalimat bebas jadi penyesuaian angka (Gemini/Groq). None kalau gagal/mati."""
+    return ai_json(AI_PROMPT % text[:400])
 
 def apply_ai(prefs, data):
     """Terapkan delta dari AI (dibatasi aman). Kembalikan daftar yg berubah."""
@@ -1075,7 +1107,7 @@ def _latest_pending(mem):
     return best
 
 def ai_image_keywords(slide_texts):
-    """1 panggilan Gemini -> kata kunci FOTO (Inggris, aesthetic) per slide. None kalau gagal."""
+    """1 panggilan AI (Gemini/Groq) -> kata kunci FOTO (Inggris, aesthetic) per slide. None kalau gagal."""
     if not AI_CHAT_ENABLED or not slide_texts:
         return None
     joined = "\n".join(f"{i+1}. {(t or '')[:160]}" for i, t in enumerate(slide_texts))
@@ -1083,21 +1115,14 @@ def ai_image_keywords(slide_texts):
         "Kamu art director untuk brand konseling pernikahan (gaya editorial/aesthetic luar negeri, nuansa sinematik & soft).\n"
         "Untuk TIAP slide di bawah, buat 1 kata kunci pencarian FOTO STOK dalam BAHASA INGGRIS (3-5 kata), "
         "fokus ke suasana/visual (bukan terjemahan harfiah teks), hindari tulisan/logo, utamakan natural light & tone lembut.\n"
-        "Balas HANYA JSON array of string, urut sesuai nomor, panjang PERSIS sama dengan jumlah slide.\n\n" + joined)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    body = {"contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.4, "responseMimeType": "application/json"}}
+        'Balas HANYA JSON object: {"keywords": ["...", "..."]} dengan panjang array PERSIS sama dengan jumlah slide.\n\n' + joined)
+    data = ai_json(prompt)
     try:
-        r = requests.post(url, json=body, timeout=45)
-        if r.status_code != 200:
-            print(f"    ! Gemini keyword {r.status_code}: {r.text[:160]}")
-            return None
-        raw = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        arr = json.loads(raw)
+        arr = (data or {}).get("keywords")
         if isinstance(arr, list) and arr:
             return [str(x) for x in arr]
-    except Exception as e:
-        print("    ! Gemini keyword gagal:", e)
+    except Exception:
+        pass
     return None
 
 def _queue_revision(mem, rec, reason_label):
