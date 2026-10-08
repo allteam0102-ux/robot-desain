@@ -3,7 +3,7 @@
     "head_scale": 1.0,
     "body_scale": 1.0,
     "scrim": 1.0,
-    "soft": 0.16
+    "soft": 0.24
   },
   "pending": {
     "97bdc914": {
@@ -36,11 +36,11 @@
       "ts": 1791230667,
       "revision": 3
     },
-    "0abfeb4c": {
+    "d4e2e766": {
       "title": "34. I-KONSELING",
       "page_id": "3d1d3753-c100-802e-aa2e-d585acb36185",
-      "ts": 1791481528,
-      "revision": 0
+      "ts": 1791482059,
+      "revision": 1
     }
   },
   "awaiting_text": null,
@@ -68,21 +68,29 @@
       "title": "28. MC KONSELING",
       "status": "rejected",
       "reason": "Gambar kurang aesthetic"
+    },
+    {
+      "ts": 1791482008,
+      "title": "desain",
+      "status": "rejected",
+      "reason": "Gambar kurang aesthetic"
     }
   ],
   "stats": {
     "approved": 0,
-    "rejected": 5,
+    "rejected": 7,
     "weekly": []
   },
-  "tg_offset": 669680868,
+  "tg_offset": 669680874,
   "resolved": [
     "76b6c4c4",
     "a95e185f",
     "6cb6e384",
     "8d79b8d7",
-    "1a301caa"
+    "1a301caa",
+    "0abfeb4c",
+    "0a795641"
   ],
-  "_last_processed": 0,
+  "_last_processed": 2,
   "revise_queue": {}
 }
