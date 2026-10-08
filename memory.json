@@ -41,9 +41,15 @@
       "page_id": "3d1d3753-c100-802e-aa2e-d585acb36185",
       "ts": 1791483159,
       "revision": 3
+    },
+    "6fecba0f": {
+      "title": "34. I-KONSELING",
+      "page_id": "3d1d3753-c100-802e-aa2e-d585acb36185",
+      "ts": 1791483470,
+      "revision": 4
     }
   },
-  "awaiting_text": null,
+  "awaiting_text": "cec62903",
   "log": [
     {
       "ts": 1791167212,
@@ -90,10 +96,10 @@
   ],
   "stats": {
     "approved": 0,
-    "rejected": 9,
+    "rejected": 10,
     "weekly": []
   },
-  "tg_offset": 669680876,
+  "tg_offset": 669680877,
   "resolved": [
     "76b6c4c4",
     "a95e185f",
@@ -103,7 +109,8 @@
     "0abfeb4c",
     "0a795641",
     "d4e2e766",
-    "fcf4c2d4"
+    "fcf4c2d4",
+    "cec62903"
   ],
   "_last_processed": 1,
   "revise_queue": {}
