@@ -52,6 +52,7 @@ CTA_TEXT      = os.environ.get("CTA_TEXT")      or "GESER →"
 ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "7C3AED").lstrip("#")   # ungu (warna utama)
 ACCENT2_COLOR = (os.environ.get("ACCENT2_COLOR") or "159A9A").lstrip("#")  # tosca/teal (warna kedua)
 LOGO_URL      = os.environ.get("LOGO_URL")      or ""
+LOGO_DARK_URL = os.environ.get("LOGO_DARK_URL") or ""   # logo versi gelap (dipakai di slide background TERANG)
 HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Montserrat"
 BODY_FONT     = os.environ.get("BODY_FONT")     or "Montserrat"
 CTA_HANDLE    = os.environ.get("CTA_HANDLE")    or "@nikahinstitute"
@@ -166,6 +167,34 @@ def notion_get_page(page_id):
     except Exception as e:
         print("  ! notion_get_page gagal:", e)
     return None
+
+def notion_page_images(page_id):
+    """Ambil URL semua gambar yang DITEMPEL di body halaman Notion, urut dari atas.
+    Dipakai fitur 'bawa gambar sendiri' saat slide ditandai [img] tanpa URL."""
+    urls, cursor = [], None
+    try:
+        for _ in range(10):   # maks 10 halaman blok (aman)
+            params = {"page_size": 100}
+            if cursor:
+                params["start_cursor"] = cursor
+            r = requests.get(f"{NOTION_BASE}/blocks/{page_id}/children",
+                             headers=NOTION_HEADERS, params=params, timeout=30)
+            if r.status_code != 200:
+                break
+            j = r.json()
+            for b in j.get("results", []):
+                if b.get("type") == "image":
+                    img = b.get("image", {})
+                    u = (img.get("file") or {}).get("url") or (img.get("external") or {}).get("url")
+                    if u:
+                        urls.append(u)
+            if j.get("has_more"):
+                cursor = j.get("next_cursor")
+            else:
+                break
+    except Exception as e:
+        print("    ! gagal baca attachment Notion:", e)
+    return urls
 
 def notion_set_status(page_id, status_value, note=None, icon_emoji=None):
     url = f"{NOTION_BASE}/pages/{page_id}"
@@ -351,6 +380,58 @@ def image_pick(query, used_ids):
             except Exception as e:
                 print(f"    ! {src} gagal ('{_short_q(q)}'): {e}")
     return None, None
+
+# ---------- FITUR: BAWA GAMBAR SENDIRI (mis. hasil doodle Gemini) ----------
+def extract_custom_image(block):
+    """Deteksi penanda gambar custom di teks slide.
+    Penanda yg didukung (huruf besar/kecil bebas):
+      [img]https://.../foto.png[/img]  -> pakai gambar dari URL itu
+      [img]                            -> pakai gambar tempelan Notion berikutnya
+      [img:light] / [gambar:terang]    -> paksa teks GELAP (buat background terang)
+      [img:dark]  / [gambar:gelap]     -> paksa teks PUTIH (buat background gelap)
+    Kembalikan (teks_bersih, url_atau_None, minta_custom, tema_paksa_atau_None).
+    """
+    wants, url, forced = False, None, None
+    mt = re.search(r"\[\s*(?:img|gambar)\s*:\s*(light|dark|terang|gelap)\s*\]", block, re.I)
+    if mt:
+        wants = True
+        v = mt.group(1).lower()
+        forced = "light" if v in ("light", "terang") else "dark"
+        block = block[:mt.start()] + block[mt.end():]
+    m = re.search(r"\[\s*(?:img|gambar)\s*\]", block, re.I)
+    if m:
+        wants = True
+        after = block[m.end():]
+        um = re.match(r"\s*(https?://[^\s\[\]]+)", after)   # URL berhenti sebelum '[' (penutup [/img])
+        if um:
+            url = um.group(1).rstrip(').,')
+            after = after[um.end():]
+        after = re.sub(r"^\s*\[\s*/\s*(?:img|gambar)\s*\]", "", after, flags=re.I)
+        block = block[:m.start()] + after
+    return block.strip(), url, wants, forced
+
+def download_image_bytes(url):
+    """Ambil gambar dari URL (buat fitur bawa-gambar-sendiri). None kalau gagal/bukan gambar."""
+    try:
+        data = requests.get(url, headers=UA, timeout=60).content
+        Image.open(io.BytesIO(data)).verify()
+        return data
+    except Exception as e:
+        print("    ! gagal ambil gambar custom:", e)
+        return None
+
+def _mean_lum(im):
+    """Rata-rata terang (0 gelap .. 255 putih)."""
+    try:
+        return ImageStat.Stat(im.convert("L")).mean[0]
+    except Exception:
+        return 0.0
+
+def pick_theme(base_img, forced=None):
+    """Tentukan tema teks: 'light' (background terang -> teks gelap) / 'dark' (teks putih)."""
+    if forced:
+        return forced
+    return "light" if _mean_lum(base_img) >= 140 else "dark"
 
 def make_placeholder():
     im = Image.new("RGB", (CANVAS_W, CANVAS_H), (30, 20, 45))
@@ -605,11 +686,12 @@ def render_cta_full(bg_img, cta_text, out_path):
     return out_path
 
 
-def download_logo_path():
-    if not LOGO_URL:
+def download_logo_path(url=None):
+    url = url if url is not None else LOGO_URL
+    if not url:
         return None
     try:
-        data = requests.get(LOGO_URL, headers=UA, timeout=30).content
+        data = requests.get(url, headers=UA, timeout=30).content
         path = os.path.join(tempfile.gettempdir(), f"logo_{int(time.time()*1000)}.png")
         with open(path, "wb") as fp:
             fp.write(data)
@@ -658,26 +740,44 @@ def add_cta_pptx(slide):
     run = p.add_run(); run.text = CTA_TEXT
     f = run.font; f.size = Pt(15); f.bold = True; f.name = BODY_FONT; f.color.rgb = ACCENT
 
+def add_dots_pptx(slide, index, total, color_hex):
+    """Titik-titik halaman di bawah-tengah (editable). index = slide aktif (0-based)."""
+    if total <= 1:
+        return
+    d = 0.013           # diameter (fraksi lebar) -> pakai fx utk w & h biar bulat
+    gap = d * 1.9
+    start = 0.5 - (total - 1) * gap / 2
+    y = 0.90
+    for k in range(total):
+        x = start + k * gap
+        shp = slide.shapes.add_shape(MSO_SHAPE.OVAL, fx(x), fy(y), fx(d), fx(d))
+        shp.fill.solid()
+        shp.fill.fore_color.rgb = ACCENT if k == index else hex_rgb(color_hex)
+        shp.line.fill.background(); shp.shadow.inherit = False
+
 def _pp_align(a):
     return PP_ALIGN.CENTER if a == "center" else PP_ALIGN.LEFT
 
-def _slide_header(slide, logo_path):
+def _slide_header(slide, logo_path, txt="FFFFFF"):
     if logo_path:
         try:
             slide.shapes.add_picture(logo_path, fx(0.06), fy(0.045), height=fy(0.045))
         except Exception:
             pass
     if BRAND_TAGLINE:
-        _add_text(slide, 0.52, 0.045, 0.42, 0.08, BRAND_TAGLINE, 14, True, BODY_FONT, "FFFFFF", align=PP_ALIGN.RIGHT)
+        _add_text(slide, 0.52, 0.045, 0.42, 0.08, BRAND_TAGLINE, 14, True, BODY_FONT, txt, align=PP_ALIGN.RIGHT)
 
-def build_pptx(slides_data, out_path, logo_path):
+def build_pptx(slides_data, out_path, logo_path, logo_dark_path=None):
     prs = Presentation()
     prs.slide_width = Emu(EMU_W); prs.slide_height = Emu(EMU_H)
     blank = prs.slide_layouts[6]
     for s in slides_data:
         slide = prs.slides.add_slide(blank)
         slide.shapes.add_picture(s["image_path"], 0, 0, width=prs.slide_width, height=prs.slide_height)
-        _slide_header(slide, logo_path)
+        theme = s.get("theme", "dark")
+        txt = "FFFFFF" if theme == "dark" else "222222"
+        hdr_logo = logo_dark_path if (theme == "light" and logo_dark_path) else logo_path
+        _slide_header(slide, hdr_logo, txt=txt)
 
         if s.get("kind") == "cta":
             # kotak ungu + teks CTA (editable)
@@ -690,6 +790,7 @@ def build_pptx(slides_data, out_path, logo_path):
             f = run.font; f.size = Pt(22); f.bold = True; f.name = HEADLINE_FONT; f.color.rgb = WHITE
             if FOOTER_TEXT:
                 _add_text(slide, 0.06, 0.93, 0.88, 0.055, FOOTER_TEXT, 11, False, BODY_FONT, "FFFFFF", align=PP_ALIGN.CENTER)
+            add_dots_pptx(slide, s.get("index", 1) - 1, s.get("total", 1), "FFFFFF")
             continue
 
         zone = s.get("zone", "bottom")
@@ -698,14 +799,15 @@ def build_pptx(slides_data, out_path, logo_path):
         al = _pp_align(L["align"])
         if s["headline"]:
             _add_text(slide, L["hx"], L["hy"], L["hw"], 0.18, s["headline"],
-                      head_pt(zone, cover), True, HEADLINE_FONT, "FFFFFF", align=al, highlight=True)
+                      head_pt(zone, cover), True, HEADLINE_FONT, txt, align=al, highlight=True)
         if s["body"]:
             _add_text(slide, L["bx"], body_top(zone, cover), L["bw"], 0.34, s["body"],
-                      body_pt(zone), False, BODY_FONT, "FFFFFF", align=al, highlight=True)
+                      body_pt(zone), False, BODY_FONT, txt, align=al, highlight=True)
         if FOOTER_TEXT:
-            _add_text(slide, 0.06, 0.93, 0.58, 0.055, FOOTER_TEXT, 11, False, BODY_FONT, "FFFFFF")
+            _add_text(slide, 0.06, 0.93, 0.58, 0.055, FOOTER_TEXT, 11, False, BODY_FONT, txt)
         if s["total"] > 1 and CTA_TEXT:
             add_cta_pptx(slide)
+        add_dots_pptx(slide, s.get("index", 1) - 1, s.get("total", 1), txt)
     prs.save(out_path)
     return out_path
 
@@ -725,11 +827,13 @@ def _est_w(s, size):
     # perkiraan lebar teks (tanpa metrik font) — cukup buat center/right align
     return len(s) * size * 0.52
 
-def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=False, gap=1.25):
+def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=False, gap=1.25,
+              color="FFFFFF"):
     """
     Teks OTOMATIS TURUN BARIS (wrap) biar PAS di dalam frame (nggak meleber).
     Tiap baris hasil wrap = satu <text> (anchor start, x digeser manual utk
     center/right). Stabilo (==) & miring (_) tetap jalan inline.
+    'color' = warna teks biasa (FFFFFF utk bg gelap, 222222 utk bg terang).
     """
     weight = "700" if bold else "400"
     # huruf tebal lebih lebar -> pakai faktor lebih besar biar wrap lebih awal (nggak meleber)
@@ -783,7 +887,7 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
                     frag += tok
             base = yy + size
             out.append(f'<text x="{lx}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
-                       f'fill="#FFFFFF" font-family="{_svg_escape(font)}, Arial, sans-serif" '
+                       f'fill="#{color}" font-family="{_svg_escape(font)}, Arial, sans-serif" '
                        f'font-size="{size}" font-weight="{weight}">{frag}</text>')
             yy += lh
     return "\n".join(out)
@@ -823,27 +927,50 @@ def _scrim_svg(zone, xo, idx):
     rects.append(f'<rect x="{xo}" y="{int(0.86*H)}" width="{W}" height="{int(0.14*H)}" fill="url(#{gid}b)"/>')
     return "\n".join(defs), "\n".join(rects)
 
-def build_svg(slides_data, out_path, logo_path):
+def _dots_svg(xo, index, total, color):
+    """Titik-titik indikator halaman di bawah-tengah. index = slide aktif (0-based)."""
+    if total <= 1:
+        return ""
+    cy = int(0.905 * CANVAS_H)
+    r = max(4, int(0.007 * CANVAS_W))
+    gap = r * 3
+    span = (total - 1) * gap
+    start = xo + CANVAS_W // 2 - span // 2
+    out = []
+    for k in range(total):
+        cx = start + k * gap
+        if k == index:
+            out.append(f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="#{ACCENT_COLOR}"/>')
+        else:
+            out.append(f'<circle cx="{cx}" cy="{cy}" r="{int(r*0.78)}" fill="#{color}" fill-opacity="0.35"/>')
+    return "\n".join(out)
+
+def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
     total = len(slides_data)
     W = CANVAS_W * total; H = CANVAS_H
     logo_uri = _img_data_uri(logo_path) if logo_path else None
+    logo_dark_uri = _img_data_uri(logo_dark_path) if logo_dark_path else None
     defs_all, parts = [], []
     for idx, s in enumerate(slides_data):
         xo = idx * CANVAS_W
+        theme = s.get("theme", "dark")
+        txt = "FFFFFF" if theme == "dark" else "222222"   # warna teks biasa
         # foto BERSIH (tanpa masking dibakar) -> masking ditaruh sbg vektor
         photo = s.get("clean_path") or s["image_path"]
         parts.append(f'<image x="{xo}" y="0" width="{CANVAS_W}" height="{H}" '
                      f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(photo)}"/>')
-        # masking vektor (cuma utk slide foto biasa; CTA latar sudah gelap)
-        if s.get("kind") != "cta":
+        # masking vektor hanya utk slide gelap (slide terang: bg udah terang, nggak perlu overlay)
+        if s.get("kind") != "cta" and theme == "dark":
             d, r = _scrim_svg(s.get("zone", "bottom"), xo, idx)
             defs_all.append(d); parts.append(r)
-        if logo_uri:
+        # logo: pakai versi gelap di slide terang (kalau ada)
+        use_logo = logo_dark_uri if (theme == "light" and logo_dark_uri) else logo_uri
+        if use_logo:
             parts.append(f'<image x="{xo + int(0.06*CANVAS_W)}" y="{int(0.05*H)}" '
-                         f'height="{int(0.05*H)}" href="{logo_uri}"/>')
+                         f'height="{int(0.05*H)}" href="{use_logo}"/>')
         if BRAND_TAGLINE:
             parts.append(_svg_text(BRAND_TAGLINE, xo + int(0.94*CANVAS_W), int(0.05*H),
-                                   int(0.4*CANVAS_W), 26, True, BODY_FONT, anchor="end"))
+                                   int(0.4*CANVAS_W), 26, True, BODY_FONT, anchor="end", color=txt))
 
         if s.get("kind") == "cta":
             bx = xo + int(0.10 * CANVAS_W); by = int(0.63 * H)
@@ -855,6 +982,7 @@ def build_svg(slides_data, out_path, logo_path):
             if FOOTER_TEXT:
                 parts.append(_svg_text(FOOTER_TEXT, xo + int(0.50 * CANVAS_W), int(0.925 * H),
                                        int(0.88 * CANVAS_W), 20, False, BODY_FONT, anchor="middle"))
+            parts.append(_dots_svg(xo, s.get("index", idx + 1) - 1, s.get("total", total), "FFFFFF"))
             continue
 
         zone = s.get("zone", "bottom")
@@ -871,21 +999,23 @@ def build_svg(slides_data, out_path, logo_path):
         if s["headline"]:
             parts.append(_svg_text(s["headline"], hx, int(L["hy"] * H),
                                    int(L["hw"] * CANVAS_W), head_px(zone, cover), True, HEADLINE_FONT,
-                                   anchor=anc, highlight=True))
+                                   anchor=anc, highlight=True, color=txt))
         if s["body"]:
             parts.append(_svg_text(s["body"], bx, int(body_top(zone, cover) * H),
                                    int(L["bw"] * CANVAS_W), body_px(zone), False, BODY_FONT,
-                                   anchor=anc, highlight=True))
+                                   anchor=anc, highlight=True, color=txt))
         if FOOTER_TEXT:
             parts.append(_svg_text(FOOTER_TEXT, xo + int(0.06*CANVAS_W), int(0.925*H),
-                                   int(0.6*CANVAS_W), 20, False, BODY_FONT))
-        if total > 1 and CTA_TEXT:
+                                   int(0.6*CANVAS_W), 20, False, BODY_FONT, color=txt))
+        if s.get("total", total) > 1 and CTA_TEXT:
             px = xo + int(0.66*CANVAS_W); py = int(0.90*H)
             pw = int(0.28*CANVAS_W); ph = int(0.06*H)
             parts.append(f'<rect x="{px}" y="{py}" width="{pw}" height="{ph}" rx="{ph//2}" fill="#FFFFFF"/>')
             parts.append(f'<text x="{px+pw//2}" y="{py+int(ph*0.66)}" text-anchor="middle" '
                          f'font-family="{_svg_escape(BODY_FONT)}, Arial, sans-serif" '
                          f'font-size="26" font-weight="700" fill="#{ACCENT_COLOR}">{_svg_escape(CTA_TEXT)}</text>')
+        # titik-titik halaman
+        parts.append(_dots_svg(xo, s.get("index", idx + 1) - 1, s.get("total", total), txt))
     header = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
               f'viewBox="0 0 {W} {H}">')
     defs = "<defs>\n" + "\n".join(d for d in defs_all if d) + "\n</defs>" if defs_all else ""
@@ -1032,6 +1162,9 @@ GROQ_API_KEY    = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL      = os.environ.get("GROQ_MODEL") or "openai/gpt-oss-20b"
 AI_CHAT_ENABLED = ((os.environ.get("AI_CHAT_ENABLED") or "true").lower() == "true"
                    and (bool(GEMINI_API_KEY) or bool(GROQ_API_KEY)))
+# cek mandiri pakai 'mata' AI (Gemini vision). gratis (gambar sbg INPUT), cuma butuh Gemini key.
+VISION_CHECK_ENABLED = ((os.environ.get("VISION_CHECK_ENABLED") or "true").lower() == "true"
+                        and bool(GEMINI_API_KEY))
 
 def _gemini_json(prompt):
     if not GEMINI_API_KEY:
@@ -1136,6 +1269,49 @@ def ai_image_keywords(slide_texts):
     except Exception:
         pass
     return None
+
+def _gemini_vision_json(prompt, image_path):
+    """Kirim gambar + pertanyaan ke Gemini (mode 'mata'/vision), minta jawaban JSON."""
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        with open(image_path, "rb") as fp:
+            b64 = base64.b64encode(fp.read()).decode()
+    except Exception:
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    body = {"contents": [{"parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/png", "data": b64}}]}],
+            "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}}
+    try:
+        r = requests.post(url, json=body, timeout=60)
+        if r.status_code != 200:
+            print(f"    ! Gemini vision {r.status_code}: {r.text[:120]}")
+            return None
+        return json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+    except Exception as e:
+        print("    ! Gemini vision gagal:", e); return None
+
+def ai_vision_check(image_path, zone, theme):
+    """Cek mandiri: kirim BACKGROUND slide ke Gemini, tanya apakah teks bakal mudah dibaca.
+    Kembalikan {ok: bool, issue: str} atau None kalau mati/gagal."""
+    if not VISION_CHECK_ENABLED:
+        return None
+    zmap = {"top": "atas", "bottom": "bawah", "left": "kiri", "right": "kanan", "center": "tengah"}
+    warna = "putih" if theme == "dark" else "gelap (hampir hitam)"
+    prompt = (
+        "Kamu reviewer desain konten Instagram. Ini BACKGROUND sebuah slide (teks belum ditaruh).\n"
+        f"Rencana: teks judul + isi diletakkan di area {zmap.get(zone, zone)}, warna teks {warna}.\n"
+        "Nilai apakah di area itu teks akan MUDAH DIBACA: kontras cukup, area tidak terlalu ramai/berpola, "
+        "dan tidak menutupi wajah/objek penting.\n"
+        'Balas HANYA JSON: {"ok": true atau false, "issue": "<masalah singkat bahasa Indonesia maks 12 kata; '
+        'kosongkan kalau sudah ok>"}'
+    )
+    data = _gemini_vision_json(prompt, image_path)
+    if not isinstance(data, dict):
+        return None
+    return {"ok": bool(data.get("ok", True)), "issue": str(data.get("issue") or "").strip()}
 
 def _queue_revision(mem, rec, reason_label):
     """Masukkan konten ke antrian revisi (biar run berikutnya di-generate ulang)."""
@@ -1321,8 +1497,24 @@ def process_page(page, workdir, mem=None, revision=None):
     print(f"  -> '{title}' | {fmt} | {len(slide_blocks)} slide")
 
     slides_data, preview_paths, credits = [], [], []
+    vision_notes = []           # catatan cek mandiri (AI vision)
     used_ids = set()
     total = len(slide_blocks)
+
+    # fitur "bawa gambar sendiri": daftar gambar tempelan Notion diambil sekali (lazy),
+    # lalu dipakai urut utk slide yang ditandai [img] tanpa URL.
+    _att = {"list": None, "idx": 0}
+    def next_notion_image():
+        if _att["list"] is None:
+            _att["list"] = notion_page_images(page_id)
+            if _att["list"]:
+                print(f"  [attachment Notion: {len(_att['list'])} gambar ditemukan]")
+        lst = _att["list"] or []
+        if _att["idx"] < len(lst):
+            u = lst[_att["idx"]]; _att["idx"] += 1
+            return u
+        return None
+
     for i, block in enumerate(slide_blocks, start=1):
         # --- SLIDE CTA khusus ---
         if is_cta_block(block):
@@ -1339,36 +1531,76 @@ def process_page(page, workdir, mem=None, revision=None):
             credits.append(f"Slide {i}: (slide CTA — mockup HP + kotak ungu)")
             continue
 
-        headline, body = headline_and_body(block)
-        # prioritas kata kunci: kolom "Kata Kunci Gambar" > AI (Inggris aesthetic) > headline/body
-        explicit = keyword_blocks[i - 1].strip() if (i - 1) < len(keyword_blocks) else ""
-        if explicit:
-            q = keyword_for(i - 1, keyword_blocks, headline, body)
-        elif ai_kws and (i - 1) < len(ai_kws) and ai_kws[i - 1].strip():
-            q = ai_kws[i - 1].strip()
-        else:
-            q = keyword_for(i - 1, keyword_blocks, headline, body)
-        data, credit = image_pick(q, used_ids)
-        if data:
-            im = Image.open(io.BytesIO(data)).convert("RGB")
-            if credit:
-                credits.append(f"Slide {i}: {credit}")
-        else:
-            im = make_placeholder()
-            credits.append(f"Slide {i}: (background netral — gambar '{q}' tak ditemukan)")
-        base = film_grade(crop_canvas(im))
+        # --- FITUR: bawa gambar sendiri (mis. hasil doodle Gemini) ---
+        clean_block, cimg_url, wants_custom, forced_theme = extract_custom_image(block)
+        headline, body = headline_and_body(clean_block)
+
+        base = None
+        theme = "dark"
+        if wants_custom:
+            cdata = download_image_bytes(cimg_url) if cimg_url else None
+            if cdata is None:                       # nggak ada URL / URL gagal -> coba tempelan Notion
+                u = next_notion_image()
+                if u:
+                    cdata = download_image_bytes(u)
+            if cdata is not None:
+                try:
+                    cim = Image.open(io.BytesIO(cdata)).convert("RGB")
+                    base = crop_canvas(cim)         # gambar sendiri: JANGAN di-film-grade (biar doodle tetap bersih)
+                    theme = pick_theme(base, forced_theme)
+                    credits.append(f"Slide {i}: (gambar sendiri / custom, tema {theme})")
+                except Exception as e:
+                    print("    ! gambar custom rusak:", e); base = None
+            if base is None:
+                print(f"    ! gambar custom slide {i} gagal -> pakai foto stok")
+
+        if base is None:
+            # jalur normal: cari foto stok
+            # prioritas kata kunci: kolom "Kata Kunci Gambar" > AI (Inggris aesthetic) > headline/body
+            explicit = keyword_blocks[i - 1].strip() if (i - 1) < len(keyword_blocks) else ""
+            if explicit:
+                q = keyword_for(i - 1, keyword_blocks, headline, body)
+            elif ai_kws and (i - 1) < len(ai_kws) and ai_kws[i - 1].strip():
+                q = ai_kws[i - 1].strip()
+            else:
+                q = keyword_for(i - 1, keyword_blocks, headline, body)
+            data, credit = image_pick(q, used_ids)
+            if data:
+                im = Image.open(io.BytesIO(data)).convert("RGB")
+                if credit:
+                    credits.append(f"Slide {i}: {credit}")
+            else:
+                im = make_placeholder()
+                credits.append(f"Slide {i}: (background netral — gambar '{q}' tak ditemukan)")
+            base = film_grade(crop_canvas(im))
+            theme = forced_theme or "dark"
+
         zone = "bottom" if i == 1 else analyze_zone(base)   # slide 1 = cover (bawah)
         clean_path = os.path.join(workdir, f"clean_{i}.png")
         base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
         img_path = os.path.join(workdir, f"slide_{i}.png")
-        bake_scrim(base, zone, img_path)                    # versi gelap utk preview & .pptx
+        if theme == "light":
+            base.save(img_path, "PNG")                      # slide TERANG: tanpa overlay gelap
+        else:
+            bake_scrim(base, zone, img_path)                # slide GELAP: overlay spt biasa
         preview_paths.append(img_path)
         slides_data.append({"kind": "normal", "headline": headline, "body": body,
                             "image_path": img_path, "clean_path": clean_path,
-                            "index": i, "total": total, "zone": zone})
+                            "index": i, "total": total, "zone": zone, "theme": theme})
+
+        # --- #2 CEK MANDIRI (AI vision): teks bakal kebaca nggak? ---
+        chk = ai_vision_check(img_path, zone, theme)
+        if chk and not chk["ok"]:
+            vision_notes.append(f"Slide {i}: ⚠️ {chk['issue'] or 'teks mungkin kurang terbaca'}")
+        elif chk:
+            vision_notes.append(f"Slide {i}: ✅ aman")
 
     safe_name = re.sub(r"[^\w\- ]", "", title).strip().replace(" ", "_")[:40] or "desain"
     logo_path = download_logo_path()
+    # logo versi gelap dipakai di slide background terang (kalau disetel & memang ada slide terang)
+    logo_dark_path = None
+    if LOGO_DARK_URL and any(s.get("theme") == "light" for s in slides_data):
+        logo_dark_path = download_logo_path(LOGO_DARK_URL)
 
     lines = [f"🎨 {title}  ({fmt}, {total} slide)", ""]
     for i, s in enumerate(slides_data, start=1):
@@ -1382,6 +1614,13 @@ def process_page(page, workdir, mem=None, revision=None):
         if b:
             lines.append(f"  {b}")
     lines += ["", *credits]
+    if vision_notes:
+        warn = [n for n in vision_notes if "⚠️" in n]
+        if warn:
+            lines += ["", "🔎 Cek mandiri (AI vision):", *warn,
+                      "   (kalau mau diperbaiki, pencet Reject atau ketik revisimu)"]
+        else:
+            lines += ["", "🔎 Cek mandiri (AI vision): semua slide aman ✅"]
     tg_message("\n".join(lines))
 
     for i, p in enumerate(preview_paths, start=1):
@@ -1391,20 +1630,20 @@ def process_page(page, workdir, mem=None, revision=None):
 
     if OUTPUT_PPTX:
         pptx_path = os.path.join(workdir, f"{safe_name}.pptx")
-        build_pptx(slides_data, pptx_path, logo_path)
+        build_pptx(slides_data, pptx_path, logo_path, logo_dark_path)
         if not tg_document(pptx_path, caption=f"{title} — .pptx (semua slide): import ke Canva ✨"):
             tg_message("⚠️ File .pptx gagal dikirim (cek log).")
 
     if OUTPUT_SVG:
         svg_path = os.path.join(workdir, f"{safe_name}.svg")
-        build_svg(slides_data, svg_path, logo_path)
+        build_svg(slides_data, svg_path, logo_path, logo_dark_path)
         if not tg_document(svg_path, caption=f"{title} — .svg (semua slide): tarik ke Figma ✨"):
             tg_message("⚠️ File .svg gagal dikirim (cek log).")
 
     if OUTPUT_SVG_PER_SLIDE and total > 1:
         for s in slides_data:
             sp = os.path.join(workdir, f"{safe_name}_slide{s['index']}.svg")
-            build_svg([s], sp, logo_path)
+            build_svg([s], sp, logo_path, logo_dark_path)
             if not tg_document(sp, caption=f"{title} — slide {s['index']}/{total} (.svg per slide)"):
                 tg_message(f"⚠️ SVG slide {s['index']} gagal dikirim (cek log).")
 
