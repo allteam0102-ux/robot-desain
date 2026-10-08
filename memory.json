@@ -3,7 +3,7 @@
     "head_scale": 1.0,
     "body_scale": 1.05,
     "scrim": 1.0,
-    "soft": 0.4
+    "soft": 0.30000000000000004
   },
   "pending": {
     "97bdc914": {
@@ -84,6 +84,12 @@
     {
       "ts": 1791483097,
       "title": "34. I-KONSELING",
+      "status": "rejected",
+      "reason": "Gambar kurang aesthetic"
+    },
+    {
+      "ts": 1791486551,
+      "title": "desain",
       "status": "rejected",
       "reason": "Gambar kurang aesthetic"
     }
