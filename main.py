@@ -49,7 +49,8 @@ except Exception:
 BRAND_TAGLINE = os.environ.get("BRAND_TAGLINE") or "Balancing Your Love"
 FOOTER_TEXT   = os.environ.get("FOOTER_TEXT")   or "nikahinstitute.com  |  Kelas & Konseling Pranikah"
 CTA_TEXT      = os.environ.get("CTA_TEXT")      or "GESER →"
-ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "7C3AED").lstrip("#")
+ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "7C3AED").lstrip("#")   # ungu (warna utama)
+ACCENT2_COLOR = (os.environ.get("ACCENT2_COLOR") or "159A9A").lstrip("#")  # tosca/teal (warna kedua)
 LOGO_URL      = os.environ.get("LOGO_URL")      or ""
 HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Montserrat"
 BODY_FONT     = os.environ.get("BODY_FONT")     or "Montserrat"
@@ -121,6 +122,8 @@ def hex_tuple(h):
 
 ACCENT = hex_rgb(ACCENT_COLOR)
 ACCENT_T = hex_tuple(ACCENT_COLOR)
+ACCENT2 = hex_rgb(ACCENT2_COLOR)
+ACCENT2_T = hex_tuple(ACCENT2_COLOR)
 WHITE  = RGBColor(0xFF, 0xFF, 0xFF)
 
 EMU_W = CANVAS_W * 9525
@@ -257,7 +260,7 @@ def keyword_for(index, keyword_blocks, headline, body):
         q = body
     else:
         q = "aesthetic minimal"
-    q = re.sub(r"==", "", q)
+    q = re.sub(r"==|~~", "", q)
     words = re.sub(r"[^\w\s]", " ", q).split()
     return " ".join(words[:4]) if words else "aesthetic minimal"
 
@@ -271,17 +274,20 @@ def parse_highlights(text):
     return out
 
 def rich_segments(text):
-    """Pecah teks jadi segmen (teks, stabilo?, miring?). ==stabilo== dan _miring_."""
+    """Pecah teks jadi segmen (teks, ungu?, miring?, tosca?).
+    ==ungu==  ~~tosca~~  _miring_"""
     out = []
-    for part in re.split(r"(==.+?==|_[^_\n]+_)", text):
+    for part in re.split(r"(==.+?==|~~.+?~~|_[^_\n]+_)", text):
         if not part:
             continue
         if len(part) >= 4 and part.startswith("==") and part.endswith("=="):
-            out.append((part[2:-2], True, False))
+            out.append((part[2:-2], True, False, False))     # ungu
+        elif len(part) >= 4 and part.startswith("~~") and part.endswith("~~"):
+            out.append((part[2:-2], False, False, True))      # tosca
         elif len(part) >= 3 and part.startswith("_") and part.endswith("_"):
-            out.append((part[1:-1], False, True))
+            out.append((part[1:-1], False, True, False))      # miring
         else:
-            out.append((part, False, False))
+            out.append((part, False, False, False))
     return out
 
 
@@ -627,14 +633,19 @@ def _add_text(slide, left, top, width, height, text, size_pt, bold, font, color_
         p = tf.paragraphs[0] if first else tf.add_paragraph()
         first = False
         p.alignment = align
-        segs = rich_segments(line) if highlight else [(line, False, False)]
-        for seg, is_hl, is_it in (segs or [("", False, False)]):
+        segs = rich_segments(line) if highlight else [(line, False, False, False)]
+        for seg, is_hl, is_it, is_tl in (segs or [("", False, False, False)]):
             run = p.add_run()
             run.text = seg
             f = run.font
-            f.size = Pt(size_pt); f.bold = bold or is_hl; f.name = font
+            f.size = Pt(size_pt); f.bold = bold or is_hl or is_tl; f.name = font
             f.italic = is_it
-            f.color.rgb = ACCENT if is_hl else hex_rgb(color_hex)
+            if is_hl:
+                f.color.rgb = ACCENT          # ungu
+            elif is_tl:
+                f.color.rgb = ACCENT2         # tosca
+            else:
+                f.color.rgb = hex_rgb(color_hex)
     return box
 
 def add_cta_pptx(slide):
@@ -728,10 +739,10 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
 
     def words_of(line):
         res = []
-        for s, hl, it in (rich_segments(line) if highlight else [(line, False, False)]):
+        for s, hl, it, tl in (rich_segments(line) if highlight else [(line, False, False, False)]):
             for w in s.split(" "):
                 if w != "":
-                    res.append((w, hl, it))
+                    res.append((w, hl, it, tl))
         return res
 
     out = []
@@ -742,15 +753,15 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
             yy += lh; continue
         # bagi jadi beberapa baris sesuai lebar frame
         vlines, cur, cur_len = [], [], 0
-        for w, hl, it in ws:
+        for w, hl, it, tl in ws:
             add = len(w) + (1 if cur else 0)
             if cur and cur_len + add > max_chars:
                 vlines.append(cur); cur, cur_len = [], 0; add = len(w)
-            cur.append((w, hl, it)); cur_len += add
+            cur.append((w, hl, it, tl)); cur_len += add
         if cur:
             vlines.append(cur)
         for vl in vlines:
-            line_str = " ".join(w for w, _, _ in vl)
+            line_str = " ".join(w for w, _, _, _ in vl)
             lw = _est_w(line_str, size)
             if anchor == "middle":
                 lx = int(x - lw / 2)
@@ -759,11 +770,13 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
             else:
                 lx = int(x)
             frag = ""
-            for k, (w, hl, it) in enumerate(vl):
+            for k, (w, hl, it, tl) in enumerate(vl):
                 prefix = " " if k > 0 else ""
                 tok = _svg_escape(prefix + w)
                 if hl:
-                    frag += f'<tspan fill="#{ACCENT_COLOR}">{tok}</tspan>'
+                    frag += f'<tspan fill="#{ACCENT_COLOR}" font-weight="700">{tok}</tspan>'
+                elif tl:
+                    frag += f'<tspan fill="#{ACCENT2_COLOR}" font-weight="700">{tok}</tspan>'
                 elif it:
                     frag += f'<tspan font-style="italic">{tok}</tspan>'
                 else:
