@@ -42,11 +42,11 @@
       "ts": 1791483159,
       "revision": 3
     },
-    "42f8a345": {
-      "title": "34. I-KONSELING",
-      "page_id": "3d1d3753-c100-802e-aa2e-d585acb36185",
-      "ts": 1791484942,
-      "revision": 4
+    "44d12b40": {
+      "title": "28. MC KONSELING",
+      "page_id": "3d1d3753-c100-806f-9cc6-fac6fa15d597",
+      "ts": 1791485957,
+      "revision": 0
     }
   },
   "awaiting_text": null,
@@ -92,14 +92,20 @@
       "title": "34. I-KONSELING",
       "status": "rejected",
       "reason": "Gambar kurang aesthetic"
+    },
+    {
+      "ts": 1791485851,
+      "title": "34. I-KONSELING",
+      "status": "approved",
+      "reason": ""
     }
   ],
   "stats": {
-    "approved": 0,
+    "approved": 1,
     "rejected": 14,
     "weekly": []
   },
-  "tg_offset": 669680881,
+  "tg_offset": 669680882,
   "resolved": [
     "76b6c4c4",
     "a95e185f",
@@ -114,7 +120,8 @@
     "6fecba0f",
     "73d186e6",
     "e300b4ba",
-    "af50fb40"
+    "af50fb40",
+    "42f8a345"
   ],
   "_last_processed": 1,
   "revise_queue": {}
