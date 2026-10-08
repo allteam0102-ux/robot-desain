@@ -92,6 +92,12 @@
       "title": "34. I-KONSELING",
       "status": "rejected",
       "reason": "Gambar kurang aesthetic"
+    },
+    {
+      "ts": 1791485851,
+      "title": "34. I-KONSELING",
+      "status": "approved",
+      "reason": ""
     }
   ],
   "stats": {
