@@ -790,7 +790,6 @@ def build_pptx(slides_data, out_path, logo_path, logo_dark_path=None):
             f = run.font; f.size = Pt(22); f.bold = True; f.name = HEADLINE_FONT; f.color.rgb = WHITE
             if FOOTER_TEXT:
                 _add_text(slide, 0.06, 0.93, 0.88, 0.055, FOOTER_TEXT, 11, False, BODY_FONT, "FFFFFF", align=PP_ALIGN.CENTER)
-            add_dots_pptx(slide, s.get("index", 1) - 1, s.get("total", 1), "FFFFFF")
             continue
 
         zone = s.get("zone", "bottom")
@@ -807,7 +806,6 @@ def build_pptx(slides_data, out_path, logo_path, logo_dark_path=None):
             _add_text(slide, 0.06, 0.93, 0.58, 0.055, FOOTER_TEXT, 11, False, BODY_FONT, txt)
         if s["total"] > 1 and CTA_TEXT:
             add_cta_pptx(slide)
-        add_dots_pptx(slide, s.get("index", 1) - 1, s.get("total", 1), txt)
     prs.save(out_path)
     return out_path
 
@@ -982,7 +980,6 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
             if FOOTER_TEXT:
                 parts.append(_svg_text(FOOTER_TEXT, xo + int(0.50 * CANVAS_W), int(0.925 * H),
                                        int(0.88 * CANVAS_W), 20, False, BODY_FONT, anchor="middle"))
-            parts.append(_dots_svg(xo, s.get("index", idx + 1) - 1, s.get("total", total), "FFFFFF"))
             continue
 
         zone = s.get("zone", "bottom")
@@ -1014,8 +1011,6 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
             parts.append(f'<text x="{px+pw//2}" y="{py+int(ph*0.66)}" text-anchor="middle" '
                          f'font-family="{_svg_escape(BODY_FONT)}, Arial, sans-serif" '
                          f'font-size="26" font-weight="700" fill="#{ACCENT_COLOR}">{_svg_escape(CTA_TEXT)}</text>')
-        # titik-titik halaman
-        parts.append(_dots_svg(xo, s.get("index", idx + 1) - 1, s.get("total", total), txt))
     header = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
               f'viewBox="0 0 {W} {H}">')
     defs = "<defs>\n" + "\n".join(d for d in defs_all if d) + "\n</defs>" if defs_all else ""
@@ -1271,18 +1266,21 @@ def ai_image_keywords(slide_texts):
     return None
 
 def _gemini_vision_json(prompt, image_path):
-    """Kirim gambar + pertanyaan ke Gemini (mode 'mata'/vision), minta jawaban JSON."""
+    """Kirim gambar + pertanyaan ke Gemini (mode 'mata'/vision), minta jawaban JSON.
+    Gambar dikecilin dulu (max 640px, JPEG) biar payload kecil & cepat."""
     if not GEMINI_API_KEY:
         return None
     try:
-        with open(image_path, "rb") as fp:
-            b64 = base64.b64encode(fp.read()).decode()
-    except Exception:
-        return None
+        im = Image.open(image_path).convert("RGB")
+        im.thumbnail((640, 640))
+        buf = io.BytesIO(); im.save(buf, "JPEG", quality=80)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        print("    ! vision: gagal siapin gambar:", e); return None
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     body = {"contents": [{"parts": [
                 {"text": prompt},
-                {"inline_data": {"mime_type": "image/png", "data": b64}}]}],
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}],
             "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}}
     try:
         r = requests.post(url, json=body, timeout=60)
@@ -1309,6 +1307,9 @@ def ai_vision_check(image_path, zone, theme):
         'kosongkan kalau sudah ok>"}'
     )
     data = _gemini_vision_json(prompt, image_path)
+    if not isinstance(data, dict):     # coba sekali lagi kalau gagal (misal Gemini sempat sibuk)
+        time.sleep(2)
+        data = _gemini_vision_json(prompt, image_path)
     if not isinstance(data, dict):
         return None
     return {"ok": bool(data.get("ok", True)), "issue": str(data.get("issue") or "").strip()}
@@ -1590,10 +1591,14 @@ def process_page(page, workdir, mem=None, revision=None):
 
         # --- #2 CEK MANDIRI (AI vision): teks bakal kebaca nggak? ---
         chk = ai_vision_check(img_path, zone, theme)
-        if chk and not chk["ok"]:
+        if chk is None:
+            print(f"    [vision slide {i}] dilewati/gagal (AI nggak jawab)")
+        elif not chk["ok"]:
             vision_notes.append(f"Slide {i}: ⚠️ {chk['issue'] or 'teks mungkin kurang terbaca'}")
-        elif chk:
+            print(f"    [vision slide {i}] ⚠️ {chk['issue']}")
+        else:
             vision_notes.append(f"Slide {i}: ✅ aman")
+            print(f"    [vision slide {i}] aman")
 
     safe_name = re.sub(r"[^\w\- ]", "", title).strip().replace(" ", "_")[:40] or "desain"
     logo_path = download_logo_path()
@@ -1614,13 +1619,15 @@ def process_page(page, workdir, mem=None, revision=None):
         if b:
             lines.append(f"  {b}")
     lines += ["", *credits]
-    if vision_notes:
+    if VISION_CHECK_ENABLED:
         warn = [n for n in vision_notes if "⚠️" in n]
         if warn:
             lines += ["", "🔎 Cek mandiri (AI vision):", *warn,
                       "   (kalau mau diperbaiki, pencet Reject atau ketik revisimu)"]
-        else:
+        elif vision_notes:
             lines += ["", "🔎 Cek mandiri (AI vision): semua slide aman ✅"]
+        else:
+            lines += ["", "🔎 Cek mandiri (AI vision): dilewati — AI lagi sibuk, nanti dicoba lagi"]
     tg_message("\n".join(lines))
 
     for i, p in enumerate(preview_paths, start=1):
