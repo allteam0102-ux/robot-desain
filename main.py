@@ -1306,10 +1306,7 @@ def ai_vision_check(image_path, zone, theme):
         'Balas HANYA JSON: {"ok": true atau false, "issue": "<masalah singkat bahasa Indonesia maks 12 kata; '
         'kosongkan kalau sudah ok>"}'
     )
-    data = _gemini_vision_json(prompt, image_path)
-    if not isinstance(data, dict):     # coba sekali lagi kalau gagal (misal Gemini sempat sibuk)
-        time.sleep(2)
-        data = _gemini_vision_json(prompt, image_path)
+    data = _gemini_vision_json(prompt, image_path)   # 1x aja (retry malah boros kuota)
     if not isinstance(data, dict):
         return None
     return {"ok": bool(data.get("ok", True)), "issue": str(data.get("issue") or "").strip()}
@@ -1589,16 +1586,17 @@ def process_page(page, workdir, mem=None, revision=None):
                             "image_path": img_path, "clean_path": clean_path,
                             "index": i, "total": total, "zone": zone, "theme": theme})
 
-        # --- #2 CEK MANDIRI (AI vision): teks bakal kebaca nggak? ---
-        chk = ai_vision_check(img_path, zone, theme)
-        if chk is None:
-            print(f"    [vision slide {i}] dilewati/gagal (AI nggak jawab)")
-        elif not chk["ok"]:
-            vision_notes.append(f"Slide {i}: ⚠️ {chk['issue'] or 'teks mungkin kurang terbaca'}")
-            print(f"    [vision slide {i}] ⚠️ {chk['issue']}")
-        else:
-            vision_notes.append(f"Slide {i}: ✅ aman")
-            print(f"    [vision slide {i}] aman")
+        # --- #2 CEK MANDIRI (AI vision) — CUKUP slide COVER biar hemat kuota gratis Gemini ---
+        if i == 1:
+            chk = ai_vision_check(img_path, zone, theme)
+            if chk is None:
+                print("    [vision cover] dilewati/gagal (kuota/AI nggak jawab)")
+            elif not chk["ok"]:
+                vision_notes.append(f"Cover: ⚠️ {chk['issue'] or 'teks mungkin kurang terbaca'}")
+                print(f"    [vision cover] ⚠️ {chk['issue']}")
+            else:
+                vision_notes.append("Cover: ✅ aman")
+                print("    [vision cover] aman")
 
     safe_name = re.sub(r"[^\w\- ]", "", title).strip().replace(" ", "_")[:40] or "desain"
     logo_path = download_logo_path()
@@ -1625,9 +1623,9 @@ def process_page(page, workdir, mem=None, revision=None):
             lines += ["", "🔎 Cek mandiri (AI vision):", *warn,
                       "   (kalau mau diperbaiki, pencet Reject atau ketik revisimu)"]
         elif vision_notes:
-            lines += ["", "🔎 Cek mandiri (AI vision): semua slide aman ✅"]
+            lines += ["", "🔎 Cek mandiri (cover): aman ✅"]
         else:
-            lines += ["", "🔎 Cek mandiri (AI vision): dilewati — AI lagi sibuk, nanti dicoba lagi"]
+            lines += ["", "🔎 Cek mandiri: dilewati — kuota AI lagi penuh, nanti dicoba lagi"]
     tg_message("\n".join(lines))
 
     for i, p in enumerate(preview_paths, start=1):
