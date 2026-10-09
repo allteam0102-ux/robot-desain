@@ -1057,12 +1057,26 @@ def tg_buttons(text, keyboard):
     return _tg_call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text[:3500],
                                     "reply_markup": json.dumps(kb)}, label="btn")
 
+def tg_delete_webhook():
+    """Pastikan nggak ada webhook nyangkut. Webhook bikin getUpdates MANDEK (balik kosong),
+    jadi tombol/ketikan user nggak pernah kebaca walau bot tetap bisa KIRIM pesan.
+    drop_pending_updates=false -> pesan yg ketahan TIDAK dibuang (langsung kebaca sesudahnya)."""
+    try:
+        r = requests.post(f"{TG_BASE}/deleteWebhook",
+                          data={"drop_pending_updates": "false"}, timeout=20)
+        j = r.json()
+        print(f"    deleteWebhook: ok={j.get('ok')} {j.get('description','')}")
+    except Exception as e:
+        print("    ! deleteWebhook error:", e)
+
 def tg_get_updates(offset):
     try:
         r = requests.get(f"{TG_BASE}/getUpdates",
                          params={"offset": offset, "timeout": 0, "allowed_updates": json.dumps(["callback_query", "message"])},
                          timeout=40)
         j = r.json()
+        if not j.get("ok"):
+            print(f"    ! getUpdates NOT ok: {str(j)[:200]}")
         return j.get("result", []) if j.get("ok") else []
     except Exception as e:
         print("    ! getUpdates error:", e)
@@ -1338,6 +1352,7 @@ def process_feedback(mem):
     Knob diterapkan BERDASARKAN alasan yg dipencet (tidak tergantung 'pending'),
     biar tetap jalan walau catatan pending hilang. Anti-dobel pakai daftar 'resolved'."""
     prefs = mem["preferences"]
+    tg_delete_webhook()   # jaga-jaga: webhook nyangkut bikin tombol/ketikan nggak kebaca
     updates = tg_get_updates(mem.get("tg_offset", 0) + 1)
     changed = []
     processed = 0
