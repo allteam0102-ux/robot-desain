@@ -49,6 +49,7 @@ jobs:
           ACCENT2_COLOR: ${{ secrets.ACCENT2_COLOR }}
           VISION_CHECK_ENABLED: ${{ secrets.VISION_CHECK_ENABLED }}
           GAYA_PROPERTY: ${{ secrets.GAYA_PROPERTY }}
+          AI_PRIMARY: ${{ secrets.AI_PRIMARY }}
         run: python main.py
 
       - name: Simpan memori belajar (memory.json)
