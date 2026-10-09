@@ -1287,15 +1287,22 @@ def _groq_json(prompt):
     except Exception as e:
         print("    ! Groq gagal:", e); return None
 
+AI_PRIMARY = (os.environ.get("AI_PRIMARY") or "groq").lower()   # 'groq' (stabil) atau 'gemini'
+
 def ai_json(prompt):
-    """Minta jawaban JSON ke AI: coba Gemini dulu, kalau gagal/ngadat pindah ke Groq."""
+    """Minta jawaban JSON ke AI. Default: Groq dulu (lebih stabil), Gemini cadangan.
+    Bisa dibalik lewat secret AI_PRIMARY=gemini."""
     if not AI_CHAT_ENABLED:
         return None
-    data = _gemini_json(prompt)
+    if AI_PRIMARY == "gemini":
+        first, second, second_name = _gemini_json, _groq_json, "Groq"
+    else:
+        first, second, second_name = _groq_json, _gemini_json, "Gemini"
+    data = first(prompt)
     if data is None:
-        data = _groq_json(prompt)   # cadangan pas Gemini 503/limit
+        data = second(prompt)   # cadangan kalau yang utama ngadat
         if data is not None:
-            print("    (pakai Groq sebagai cadangan)")
+            print(f"    (pakai {second_name} sebagai cadangan)")
     return data
 
 AI_PROMPT = """Kamu asisten desain untuk bot konten Instagram (brand Nikah Institute).
