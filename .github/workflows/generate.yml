@@ -48,6 +48,7 @@ jobs:
           GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
           ACCENT2_COLOR: ${{ secrets.ACCENT2_COLOR }}
           VISION_CHECK_ENABLED: ${{ secrets.VISION_CHECK_ENABLED }}
+          GAYA_PROPERTY: ${{ secrets.GAYA_PROPERTY }}
         run: python main.py
 
       - name: Simpan memori belajar (memory.json)
