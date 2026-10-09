@@ -104,6 +104,7 @@ STATUS_PROPERTY  = env("STATUS_PROPERTY", "Status")
 FORMAT_PROPERTY  = env("FORMAT_PROPERTY", "Bentuk Konten")
 CONTENT_PROPERTY = env("CONTENT_PROPERTY", "Isi Konten")
 KEYWORD_PROPERTY = env("KEYWORD_PROPERTY", "Kata Kunci Gambar")
+GAYA_PROPERTY    = env("GAYA_PROPERTY", "Gaya Desain")   # kolom dropdown pilih gaya cover
 
 STATUS_READY = env("STATUS_READY", "Siap Desain")
 STATUS_DONE  = env("STATUS_DONE",  "Terkirim")
@@ -320,6 +321,42 @@ def rich_segments(text):
     return out
 
 
+# ---------- PEMILIH GAYA DESAIN (6 gaya cover Nikah Institute) ----------
+# key internal: dark / card / duotone / doodle / doodle_top
+STYLE_MAP = {
+    "1": "dark", "foto gelap": "dark", "gelap": "dark",
+    "2": "card", "kartu putih": "card", "kartu": "card", "putih": "card",
+    "3": "duotone", "tosca duotone": "duotone", "duotone": "duotone", "tosca": "duotone",
+    "4": "dark", "foto stabilo": "dark", "stabilo": "dark",
+    "5": "doodle", "doodle terang": "doodle", "doodle": "doodle",
+    "6": "doodle_top", "doodle teks atas": "doodle_top", "doodle atas": "doodle_top",
+}
+def parse_style(s):
+    """Terima teks/angka dari kolom 'Gaya Desain' -> key gaya internal. Default 'dark'."""
+    k = re.sub(r"[^\w\s]", " ", (s or "").strip().lower())
+    k = re.sub(r"\s+", " ", k).strip()
+    if not k:
+        return "dark"
+    if k in STYLE_MAP:
+        return STYLE_MAP[k]
+    m = re.search(r"\b([1-6])\b", k)           # "3", "3 tosca duotone", "gaya 3", "style 2"
+    if m and m.group(1) in STYLE_MAP:
+        return STYLE_MAP[m.group(1)]
+    for key, val in STYLE_MAP.items():
+        if not key.isdigit() and key in k:
+            return val
+    return "dark"
+
+def extract_gaya(block):
+    """Deteksi penanda [gaya: X] di teks slide (override per-slide). Kembalikan (teks_bersih, gaya|None)."""
+    gaya = None
+    m = re.search(r"\[\s*gaya\s*:\s*([^\]]+)\]", block, re.I)
+    if m:
+        gaya = parse_style(m.group(1))
+        block = block[:m.start()] + block[m.end():]
+    return block.strip(), gaya
+
+
 # ======================================================================
 # 4. GAMBAR (Unsplash utama, Pexels cadangan)
 # ======================================================================
@@ -433,6 +470,37 @@ def pick_theme(base_img, forced=None):
         return forced
     return "light" if _mean_lum(base_img) >= 140 else "dark"
 
+# ---------- filter per-GAYA ----------
+def duotone_teal(im):
+    """GAYA 3: ubah foto jadi duotone tosca gelap (grayscale -> gradasi tosca)."""
+    g = im.convert("L")
+    dark, light = (6, 28, 30), (150, 212, 208)   # tosca gelap -> tosca terang
+    def lut(a, b):
+        return [int(a + (b - a) * i / 255) for i in range(256)]
+    r = g.point(lut(dark[0], light[0]))
+    gg = g.point(lut(dark[1], light[1]))
+    b = g.point(lut(dark[2], light[2]))
+    return Image.merge("RGB", (r, gg, b))
+
+def make_card_bg(photo):
+    """GAYA 2: foto di atas (~58%) + kartu krem/putih di bawah (~42%).
+    Teks nanti ditaruh di kartu (warna gelap)."""
+    W, H = CANVAS_W, CANVAS_H
+    split = int(H * 0.58)
+    canvas = Image.new("RGB", (W, H), (248, 247, 250))     # kartu krem/putih
+    ph = photo if photo.size == (W, H) else photo.resize((W, H), Image.LANCZOS)
+    canvas.paste(ph.crop((0, 0, W, split)), (0, 0))        # foto area atas
+    # gradasi tipis di pucuk foto biar logo/tagline (putih) tetap kebaca
+    strip_h = int(0.16 * H)
+    overlay = Image.new("RGBA", (W, strip_h), (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    for y in range(strip_h):
+        a = int(130 * (1 - y / strip_h))
+        od.line([(0, y), (W, y)], fill=(0, 0, 0, a))
+    canvas.paste(Image.alpha_composite(
+        canvas.crop((0, 0, W, strip_h)).convert("RGBA"), overlay).convert("RGB"), (0, 0))
+    return canvas
+
 def make_placeholder():
     im = Image.new("RGB", (CANVAS_W, CANVAS_H), (30, 20, 45))
     d = ImageDraw.Draw(im)
@@ -504,6 +572,7 @@ ZONE_LAYOUT = {
     "left":   dict(hx=0.07, hy=0.33, hw=0.52, bx=0.07, by=0.53, bw=0.52, align="left"),
     "right":  dict(hx=0.44, hy=0.33, hw=0.50, bx=0.44, by=0.53, bw=0.50, align="left"),
     "center": dict(hx=0.10, hy=0.37, hw=0.80, bx=0.10, by=0.57, bw=0.80, align="center"),
+    "card":   dict(hx=0.07, hy=0.615, hw=0.86, bx=0.07, by=0.74, bw=0.86, align="left"),
 }
 # Slide 1 (cover) judulnya besar; slide lain judul kecil (sesuai permintaan)
 # Ukuran dikali "knob" dari sistem belajar (G_HEAD_SCALE / G_BODY_SCALE).
@@ -775,9 +844,14 @@ def build_pptx(slides_data, out_path, logo_path, logo_dark_path=None):
         slide = prs.slides.add_slide(blank)
         slide.shapes.add_picture(s["image_path"], 0, 0, width=prs.slide_width, height=prs.slide_height)
         theme = s.get("theme", "dark")
-        txt = "FFFFFF" if theme == "dark" else "222222"
-        hdr_logo = logo_dark_path if (theme == "light" and logo_dark_path) else logo_path
-        _slide_header(slide, hdr_logo, txt=txt)
+        if theme == "card":
+            tag_txt, body_txt, dark_logo = "FFFFFF", "222222", False
+        elif theme == "light":
+            tag_txt, body_txt, dark_logo = "222222", "222222", True
+        else:
+            tag_txt, body_txt, dark_logo = "FFFFFF", "FFFFFF", False
+        hdr_logo = logo_dark_path if (dark_logo and logo_dark_path) else logo_path
+        _slide_header(slide, hdr_logo, txt=tag_txt)
 
         if s.get("kind") == "cta":
             # kotak ungu + teks CTA (editable)
@@ -798,12 +872,12 @@ def build_pptx(slides_data, out_path, logo_path, logo_dark_path=None):
         al = _pp_align(L["align"])
         if s["headline"]:
             _add_text(slide, L["hx"], L["hy"], L["hw"], 0.18, s["headline"],
-                      head_pt(zone, cover), True, HEADLINE_FONT, txt, align=al, highlight=True)
+                      head_pt(zone, cover), True, HEADLINE_FONT, body_txt, align=al, highlight=True)
         if s["body"]:
             _add_text(slide, L["bx"], body_top(zone, cover), L["bw"], 0.34, s["body"],
-                      body_pt(zone), False, BODY_FONT, txt, align=al, highlight=True)
+                      body_pt(zone), False, BODY_FONT, body_txt, align=al, highlight=True)
         if FOOTER_TEXT:
-            _add_text(slide, 0.06, 0.93, 0.58, 0.055, FOOTER_TEXT, 11, False, BODY_FONT, txt)
+            _add_text(slide, 0.06, 0.93, 0.58, 0.055, FOOTER_TEXT, 11, False, BODY_FONT, body_txt)
         if s["total"] > 1 and CTA_TEXT:
             add_cta_pptx(slide)
     prs.save(out_path)
@@ -952,23 +1026,29 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
     for idx, s in enumerate(slides_data):
         xo = idx * CANVAS_W
         theme = s.get("theme", "dark")
-        txt = "FFFFFF" if theme == "dark" else "222222"   # warna teks biasa
+        # warna teks per-tema: tag_txt = logo/tagline (atas), body_txt = judul/isi/footer
+        if theme == "card":          # foto atas (putih) + kartu bawah (gelap)
+            tag_txt, body_txt, scrim_on, dark_logo = "FFFFFF", "222222", False, False
+        elif theme == "light":       # bg terang -> semua teks gelap
+            tag_txt, body_txt, scrim_on, dark_logo = "222222", "222222", False, True
+        else:                        # dark / duotone
+            tag_txt, body_txt, scrim_on, dark_logo = "FFFFFF", "FFFFFF", True, False
         # foto BERSIH (tanpa masking dibakar) -> masking ditaruh sbg vektor
         photo = s.get("clean_path") or s["image_path"]
         parts.append(f'<image x="{xo}" y="0" width="{CANVAS_W}" height="{H}" '
                      f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(photo)}"/>')
-        # masking vektor hanya utk slide gelap (slide terang: bg udah terang, nggak perlu overlay)
-        if s.get("kind") != "cta" and theme == "dark":
+        # masking vektor cuma utk slide gelap/duotone
+        if s.get("kind") != "cta" and scrim_on:
             d, r = _scrim_svg(s.get("zone", "bottom"), xo, idx)
             defs_all.append(d); parts.append(r)
-        # logo: pakai versi gelap di slide terang (kalau ada)
-        use_logo = logo_dark_uri if (theme == "light" and logo_dark_uri) else logo_uri
+        # logo: versi gelap kalau tema terang (kalau ada)
+        use_logo = logo_dark_uri if (dark_logo and logo_dark_uri) else logo_uri
         if use_logo:
             parts.append(f'<image x="{xo + int(0.06*CANVAS_W)}" y="{int(0.05*H)}" '
                          f'height="{int(0.05*H)}" href="{use_logo}"/>')
         if BRAND_TAGLINE:
             parts.append(_svg_text(BRAND_TAGLINE, xo + int(0.94*CANVAS_W), int(0.05*H),
-                                   int(0.4*CANVAS_W), 26, True, BODY_FONT, anchor="end", color=txt))
+                                   int(0.4*CANVAS_W), 26, True, BODY_FONT, anchor="end", color=tag_txt))
 
         if s.get("kind") == "cta":
             bx = xo + int(0.10 * CANVAS_W); by = int(0.63 * H)
@@ -996,14 +1076,14 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
         if s["headline"]:
             parts.append(_svg_text(s["headline"], hx, int(L["hy"] * H),
                                    int(L["hw"] * CANVAS_W), head_px(zone, cover), True, HEADLINE_FONT,
-                                   anchor=anc, highlight=True, color=txt))
+                                   anchor=anc, highlight=True, color=body_txt))
         if s["body"]:
             parts.append(_svg_text(s["body"], bx, int(body_top(zone, cover) * H),
                                    int(L["bw"] * CANVAS_W), body_px(zone), False, BODY_FONT,
-                                   anchor=anc, highlight=True, color=txt))
+                                   anchor=anc, highlight=True, color=body_txt))
         if FOOTER_TEXT:
             parts.append(_svg_text(FOOTER_TEXT, xo + int(0.06*CANVAS_W), int(0.925*H),
-                                   int(0.6*CANVAS_W), 20, False, BODY_FONT, color=txt))
+                                   int(0.6*CANVAS_W), 20, False, BODY_FONT, color=body_txt))
         if s.get("total", total) > 1 and CTA_TEXT:
             px = xo + int(0.66*CANVAS_W); py = int(0.90*H)
             pw = int(0.28*CANVAS_W); ph = int(0.06*H)
@@ -1494,6 +1574,12 @@ def process_page(page, workdir, mem=None, revision=None):
            or "Carousel")
     content = read_property(props, CONTENT_PROPERTY, "rich_text")
     keywords = read_property(props, KEYWORD_PROPERTY, "rich_text")
+    # GAYA DESAIN (buat cover) — baca dari kolom dropdown; default 'dark' (Foto Gelap)
+    gaya_raw = (read_property(props, GAYA_PROPERTY, "select")
+                or read_property(props, GAYA_PROPERTY, "status")
+                or read_property(props, GAYA_PROPERTY, "rich_text") or "")
+    content_style = parse_style(gaya_raw)
+    print(f"  [gaya cover: {content_style}  (dari '{gaya_raw or '-'}')]")
 
     if not content.strip():
         raise ValueError("Kolom 'Konten' kosong.")
@@ -1544,12 +1630,16 @@ def process_page(page, workdir, mem=None, revision=None):
             credits.append(f"Slide {i}: (slide CTA — mockup HP + kotak ungu)")
             continue
 
-        # --- FITUR: bawa gambar sendiri (mis. hasil doodle Gemini) ---
+        # --- FITUR: bawa gambar sendiri + penanda gaya ---
         clean_block, cimg_url, wants_custom, forced_theme = extract_custom_image(block)
+        clean_block, slide_gaya = extract_gaya(clean_block)
         headline, body = headline_and_body(clean_block)
+        # gaya efektif: penanda per-slide > gaya cover (slide 1) > default 'dark' (slide lain)
+        eff_style = slide_gaya or (content_style if i == 1 else "dark")
 
         base = None
         theme = "dark"
+        is_custom = False
         if wants_custom:
             cdata = download_image_bytes(cimg_url) if cimg_url else None
             if cdata is None:                       # nggak ada URL / URL gagal -> coba tempelan Notion
@@ -1561,6 +1651,7 @@ def process_page(page, workdir, mem=None, revision=None):
                     cim = Image.open(io.BytesIO(cdata)).convert("RGB")
                     base = crop_canvas(cim)         # gambar sendiri: JANGAN di-film-grade (biar doodle tetap bersih)
                     theme = pick_theme(base, forced_theme)
+                    is_custom = True
                     credits.append(f"Slide {i}: (gambar sendiri / custom, tema {theme})")
                 except Exception as e:
                     print("    ! gambar custom rusak:", e); base = None
@@ -1569,7 +1660,6 @@ def process_page(page, workdir, mem=None, revision=None):
 
         if base is None:
             # jalur normal: cari foto stok
-            # prioritas kata kunci: kolom "Kata Kunci Gambar" > AI (Inggris aesthetic) > headline/body
             explicit = keyword_blocks[i - 1].strip() if (i - 1) < len(keyword_blocks) else ""
             if explicit:
                 q = keyword_for(i - 1, keyword_blocks, headline, body)
@@ -1585,21 +1675,39 @@ def process_page(page, workdir, mem=None, revision=None):
             else:
                 im = make_placeholder()
                 credits.append(f"Slide {i}: (background netral — gambar '{q}' tak ditemukan)")
-            base = film_grade(crop_canvas(im))
-            theme = forced_theme or "dark"
+            graded = film_grade(crop_canvas(im))
+            # terapkan GAYA ke foto stok
+            if eff_style == "duotone":
+                base = duotone_teal(graded); theme = "dark"
+            elif eff_style == "card":
+                base = make_card_bg(graded); theme = "card"      # foto atas + kartu putih bawah
+            elif eff_style in ("doodle", "doodle_top"):
+                base = graded; theme = pick_theme(graded, forced_theme)  # doodle idealnya pakai [img]
+            else:
+                base = graded; theme = forced_theme or "dark"
 
-        zone = "bottom" if i == 1 else analyze_zone(base)   # slide 1 = cover (bawah)
+        # posisi teks (zone) sesuai gaya
+        if eff_style == "card" and not is_custom:
+            zone = "card"
+        elif eff_style == "doodle_top":
+            zone = "top"
+        elif i == 1:
+            zone = "bottom"                 # cover default: teks bawah
+        else:
+            zone = analyze_zone(base)
+
         clean_path = os.path.join(workdir, f"clean_{i}.png")
         base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
         img_path = os.path.join(workdir, f"slide_{i}.png")
-        if theme == "light":
-            base.save(img_path, "PNG")                      # slide TERANG: tanpa overlay gelap
-        else:
-            bake_scrim(base, zone, img_path)                # slide GELAP: overlay spt biasa
+        if theme == "dark":
+            bake_scrim(base, zone, img_path)                # overlay gelap (gaya gelap/duotone)
+        else:                                               # card / light -> tanpa overlay gelap
+            base.save(img_path, "PNG")
         preview_paths.append(img_path)
         slides_data.append({"kind": "normal", "headline": headline, "body": body,
                             "image_path": img_path, "clean_path": clean_path,
-                            "index": i, "total": total, "zone": zone, "theme": theme})
+                            "index": i, "total": total, "zone": zone,
+                            "theme": theme, "style": eff_style})
 
         # --- #2 CEK MANDIRI (AI vision) — CUKUP slide COVER biar hemat kuota gratis Gemini ---
         if i == 1:
