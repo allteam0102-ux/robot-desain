@@ -51,6 +51,8 @@ FOOTER_TEXT   = os.environ.get("FOOTER_TEXT")   or "nikahinstitute.com  |  Kelas
 CTA_TEXT      = os.environ.get("CTA_TEXT")      or "GESER →"
 ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "7C3AED").lstrip("#")   # ungu (warna utama)
 ACCENT2_COLOR = (os.environ.get("ACCENT2_COLOR") or "159A9A").lstrip("#")  # tosca/teal (warna kedua)
+STABILO_COLOR = (os.environ.get("STABILO_COLOR") or "35D0C8").lstrip("#")  # GAYA 4: sapuan highlighter (tosca cerah)
+STABILO_TXT   = (os.environ.get("STABILO_TXT")   or "16242B").lstrip("#")  # warna teks judul di atas sapuan stabilo
 LOGO_URL      = os.environ.get("LOGO_URL")      or ""
 LOGO_DARK_URL = os.environ.get("LOGO_DARK_URL") or ""   # logo versi gelap (dipakai di slide background TERANG)
 HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Montserrat"
@@ -327,7 +329,7 @@ STYLE_MAP = {
     "1": "dark", "foto gelap": "dark", "gelap": "dark",
     "2": "card", "kartu putih": "card", "kartu": "card", "putih": "card",
     "3": "duotone", "tosca duotone": "duotone", "duotone": "duotone", "tosca": "duotone",
-    "4": "dark", "foto stabilo": "dark", "stabilo": "dark",
+    "4": "stabilo", "foto stabilo": "stabilo", "stabilo": "stabilo",
     "5": "doodle", "doodle terang": "doodle", "doodle": "doodle",
     "6": "doodle_top", "doodle teks atas": "doodle_top", "doodle atas": "doodle_top",
 }
@@ -774,8 +776,39 @@ def download_logo_path(url=None):
 # ======================================================================
 # 5. PPTX
 # ======================================================================
+def _add_stabilo_band(slide, left, top, width, text, size_pt, align):
+    """GAYA 4: sapuan highlighter (stabilo) di belakang judul, per-baris (perkiraan)."""
+    plain = re.sub(r"[*_~]", "", text or "")
+    per_char = (size_pt / 72.0) * 0.5 / 11.25      # lebar 1 huruf (fraksi lebar kanvas)
+    line_h   = (size_pt / 72.0) * 1.25 / 14.0625   # tinggi 1 baris (fraksi tinggi kanvas)
+    cap = max(6, int(width / per_char)) if per_char > 0 else 20
+    lines = []
+    for para in plain.split("\n"):
+        cur = ""
+        for w in para.split(" "):
+            t = (cur + " " + w).strip()
+            if cur and len(t) > cap:
+                lines.append(cur); cur = w
+            else:
+                cur = t
+        lines.append(cur)
+    lines = [ln for ln in lines if ln.strip()] or [plain]
+    pad_w = per_char * 1.1
+    pad_h = line_h * 0.10
+    for i, ln in enumerate(lines):
+        w_frac = min(width, len(ln) * per_char * 1.16 + 2 * pad_w)
+        x = left + (width - w_frac) / 2 if align == PP_ALIGN.CENTER else left - pad_w
+        y = top + i * line_h - pad_h
+        shp = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                                     fx(max(0, x)), fy(max(0, y)),
+                                     fx(w_frac), fy(line_h + 2 * pad_h))
+        shp.fill.solid(); shp.fill.fore_color.rgb = hex_rgb(STABILO_COLOR)
+        shp.line.fill.background(); shp.shadow.inherit = False
+
 def _add_text(slide, left, top, width, height, text, size_pt, bold, font, color_hex,
-              align=PP_ALIGN.LEFT, highlight=False):
+              align=PP_ALIGN.LEFT, highlight=False, band=False):
+    if band:
+        _add_stabilo_band(slide, left, top, width, text, size_pt, align)
     box = slide.shapes.add_textbox(fx(left), fy(top), fx(width), fy(height))
     tf = box.text_frame
     tf.word_wrap = True
@@ -870,9 +903,12 @@ def build_pptx(slides_data, out_path, logo_path, logo_dark_path=None):
         cover = (s.get("index") == 1)
         L = ZONE_LAYOUT.get(zone, ZONE_LAYOUT["bottom"])
         al = _pp_align(L["align"])
+        is_stabilo = (s.get("style") == "stabilo")
+        head_color = STABILO_TXT if is_stabilo else body_txt
         if s["headline"]:
             _add_text(slide, L["hx"], L["hy"], L["hw"], 0.18, s["headline"],
-                      head_pt(zone, cover), True, HEADLINE_FONT, body_txt, align=al, highlight=True)
+                      head_pt(zone, cover), True, HEADLINE_FONT, head_color, align=al,
+                      highlight=True, band=is_stabilo)
         if s["body"]:
             _add_text(slide, L["bx"], body_top(zone, cover), L["bw"], 0.34, s["body"],
                       body_pt(zone), False, BODY_FONT, body_txt, align=al, highlight=True)
@@ -900,7 +936,7 @@ def _est_w(s, size):
     return len(s) * size * 0.52
 
 def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=False, gap=1.25,
-              color="FFFFFF"):
+              color="FFFFFF", band=None):
     """
     Teks OTOMATIS TURUN BARIS (wrap) biar PAS di dalam frame (nggak meleber).
     Tiap baris hasil wrap = satu <text> (anchor start, x digeser manual utk
@@ -958,6 +994,14 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
                 else:
                     frag += tok
             base = yy + size
+            if band and line_str.strip():
+                pad = max(6, int(size * 0.16))
+                ry = int(base - size * 0.86)
+                rh = int(size * 1.02)
+                rx = int(size * 0.10)
+                bw = int(len(line_str) * size * 0.64)   # estimasi lebar teks utk sapuan (lebih lebar dr _est_w)
+                out.append(f'<rect x="{lx - pad}" y="{ry}" width="{bw + 2 * pad}" '
+                           f'height="{rh}" rx="{rx}" fill="#{band}" fill-opacity="0.88"/>')
             out.append(f'<text x="{lx}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
                        f'fill="#{color}" font-family="{_svg_escape(font)}, Arial, sans-serif" '
                        f'font-size="{size}" font-weight="{weight}">{frag}</text>')
@@ -1073,10 +1117,13 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
             anc = "start"
             hx = xo + int(L["hx"] * CANVAS_W)
             bx = xo + int(L["bx"] * CANVAS_W)
+        is_stabilo = (s.get("style") == "stabilo")
+        head_color = STABILO_TXT if is_stabilo else body_txt
+        head_band  = STABILO_COLOR if is_stabilo else None
         if s["headline"]:
             parts.append(_svg_text(s["headline"], hx, int(L["hy"] * H),
                                    int(L["hw"] * CANVAS_W), head_px(zone, cover), True, HEADLINE_FONT,
-                                   anchor=anc, highlight=True, color=body_txt))
+                                   anchor=anc, highlight=True, color=head_color, band=head_band))
         if s["body"]:
             parts.append(_svg_text(s["body"], bx, int(body_top(zone, cover) * H),
                                    int(L["bw"] * CANVAS_W), body_px(zone), False, BODY_FONT,
@@ -1701,6 +1748,8 @@ def process_page(page, workdir, mem=None, revision=None):
                 base = make_card_bg(graded); theme = "card"      # foto atas + kartu putih bawah
             elif eff_style in ("doodle", "doodle_top"):
                 base = graded; theme = pick_theme(graded, forced_theme)  # doodle idealnya pakai [img]
+            elif eff_style == "stabilo":
+                base = graded; theme = "dark"                            # foto gelap + sapuan stabilo di judul
             else:
                 base = graded; theme = forced_theme or "dark"
 
