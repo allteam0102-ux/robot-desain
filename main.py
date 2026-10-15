@@ -68,6 +68,7 @@ CANVAS_H = int(os.environ.get("CANVAS_H") or 1350)
 OUTPUT_PPTX = (os.environ.get("OUTPUT_PPTX") or "true").lower() == "true"
 OUTPUT_SVG  = (os.environ.get("OUTPUT_SVG")  or "true").lower() == "true"
 OUTPUT_SVG_PER_SLIDE = (os.environ.get("OUTPUT_SVG_PER_SLIDE") or "true").lower() == "true"
+OUTPUT_HTML = (os.environ.get("OUTPUT_HTML") or "true").lower() == "true"   # buat import ke Figma (text box asli)
 
 # ----------------------------------------------------------------------
 # SISTEM BELAJAR (memory + feedback). File memori disimpan di repo.
@@ -1177,6 +1178,113 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
 
 
 # ======================================================================
+# 6b. HTML (buat import ke Figma via plugin html.to.design -> text box ASLI)
+# ======================================================================
+def _html_rich(text):
+    """Ubah teks (dgn penanda **ungu** / ~~tosca~~ / _miring_) jadi HTML; newline -> <br>."""
+    lines = []
+    for line in (text or "").split("\n"):
+        frag = ""
+        for seg, hl, it, tl in rich_segments(line):
+            s = html.escape(seg)
+            if hl:
+                frag += f'<span style="color:#{ACCENT_COLOR};font-weight:700">{s}</span>'
+            elif tl:
+                frag += f'<span style="color:#{ACCENT2_COLOR};font-weight:700">{s}</span>'
+            elif it:
+                frag += f'<span style="font-style:italic">{s}</span>'
+            else:
+                frag += s
+        lines.append(frag)
+    return "<br>".join(lines)
+
+def build_html(slides_data, out_path, logo_path, logo_dark_path=None):
+    W, H = CANVAS_W, CANVAS_H
+    logo_uri = _img_data_uri(logo_path) if logo_path else None
+    logo_dark_uri = _img_data_uri(logo_dark_path) if logo_dark_path else None
+    css = f"""
+*{{margin:0;padding:0;box-sizing:border-box;}}
+body{{background:#444;}}
+.slide{{position:relative;width:{W}px;height:{H}px;overflow:hidden;
+  font-family:'{HEADLINE_FONT}','Montserrat',Arial,sans-serif;margin:0 auto 24px;}}
+.bg{{position:absolute;inset:0;width:{W}px;height:{H}px;object-fit:cover;}}
+.logo{{position:absolute;left:{int(0.06*W)}px;top:{int(0.045*H)}px;height:{int(0.05*H)}px;}}
+.tagline{{position:absolute;right:{int(0.06*W)}px;top:{int(0.05*H)}px;
+  font-weight:700;font-size:26px;text-align:right;}}
+.hl{{position:absolute;font-weight:700;line-height:1.12;}}
+.bd{{position:absolute;font-weight:400;line-height:1.32;}}
+.footer{{position:absolute;left:{int(0.06*W)}px;top:{int(0.925*H)}px;
+  font-size:20px;font-weight:400;max-width:{int(0.58*W)}px;}}
+.footer-c{{position:absolute;left:0;width:{W}px;top:{int(0.925*H)}px;
+  font-size:20px;text-align:center;color:#fff;}}
+.stabilo{{background:#{STABILO_COLOR};color:#{STABILO_TXT};
+  -webkit-box-decoration-break:clone;box-decoration-break:clone;
+  padding:0.04em 0.14em;border-radius:0.08em;}}
+.cta-pill{{position:absolute;left:{int(0.66*W)}px;top:{int(0.90*H)}px;
+  width:{int(0.28*W)}px;height:{int(0.06*H)}px;background:#fff;color:#{ACCENT_COLOR};
+  border-radius:{int(0.03*H)}px;display:flex;align-items:center;justify-content:center;
+  font-weight:700;font-size:26px;}}
+.ctabox{{position:absolute;left:{int(0.10*W)}px;top:{int(0.63*H)}px;
+  width:{int(0.80*W)}px;height:{int(0.27*H)}px;background:#{ACCENT_COLOR};color:#fff;
+  border-radius:40px;display:flex;align-items:center;justify-content:center;text-align:center;
+  font-weight:700;font-size:40px;padding:0 40px;}}
+"""
+    frames = []
+    for s in slides_data:
+        theme = s.get("theme", "dark")
+        if theme == "card":
+            tag_txt, body_txt = "FFFFFF", "222222"
+        elif theme == "light":
+            tag_txt, body_txt = "222222", "222222"
+        else:
+            tag_txt, body_txt = "FFFFFF", "FFFFFF"
+        parts = [f'<img class="bg" src="{_img_data_uri(s.get("image_path"))}">']
+        use_logo = logo_dark_uri if (theme == "light" and logo_dark_uri) else logo_uri
+        if use_logo:
+            parts.append(f'<img class="logo" src="{use_logo}">')
+        if BRAND_TAGLINE:
+            parts.append(f'<div class="tagline" style="color:#{tag_txt}">{html.escape(BRAND_TAGLINE)}</div>')
+
+        if s.get("kind") == "cta":
+            parts.append(f'<div class="ctabox">{html.escape(s.get("cta_text",""))}</div>')
+            if FOOTER_TEXT:
+                parts.append(f'<div class="footer-c">{html.escape(FOOTER_TEXT)}</div>')
+            frames.append(f'<div class="slide">{"".join(parts)}</div>')
+            continue
+
+        zone = s.get("zone", "bottom"); cover = (s.get("index") == 1)
+        L = ZONE_LAYOUT.get(zone, ZONE_LAYOUT["bottom"])
+        align = "center" if L["align"] == "center" else "left"
+        is_stabilo = (s.get("style") == "stabilo")
+        if s.get("headline"):
+            hcolor = STABILO_TXT if is_stabilo else body_txt
+            inner = _html_rich(s["headline"])
+            if is_stabilo:
+                inner = f'<span class="stabilo">{inner}</span>'
+            parts.append(
+                f'<div class="hl" style="left:{int(L["hx"]*W)}px;top:{int(L["hy"]*H)}px;'
+                f'width:{int(L["hw"]*W)}px;font-size:{head_px(zone,cover)}px;'
+                f'color:#{hcolor};text-align:{align}">{inner}</div>')
+        if s.get("body"):
+            parts.append(
+                f'<div class="bd" style="left:{int(L["bx"]*W)}px;top:{int(body_top(zone,cover)*H)}px;'
+                f'width:{int(L["bw"]*W)}px;font-size:{body_px(zone)}px;'
+                f'color:#{body_txt};text-align:{align}">{_html_rich(s["body"])}</div>')
+        if FOOTER_TEXT:
+            parts.append(f'<div class="footer" style="color:#{body_txt}">{html.escape(FOOTER_TEXT)}</div>')
+        if s.get("total", 1) > 1 and CTA_TEXT:
+            parts.append(f'<div class="cta-pill">{html.escape(CTA_TEXT)}</div>')
+        frames.append(f'<div class="slide">{"".join(parts)}</div>')
+
+    doc = ("<!doctype html><html><head><meta charset=\"utf-8\">"
+           "<link href=\"https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,700;1,400&display=swap\" rel=\"stylesheet\">"
+           f"<style>{css}</style></head><body>" + "".join(frames) + "</body></html>")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(doc)
+    return out_path
+
+
+# ======================================================================
 # 7. TELEGRAM
 # ======================================================================
 TG_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
@@ -1942,6 +2050,12 @@ def process_page(page, workdir, mem=None, revision=None):
             build_svg([s], sp, logo_path, logo_dark_path)
             if not tg_document(sp, caption=f"{title} — slide {s['index']}/{total} (.svg per slide)"):
                 tg_message(f"⚠️ SVG slide {s['index']} gagal dikirim (cek log).")
+
+    if OUTPUT_HTML:
+        html_path = os.path.join(workdir, f"{safe_name}.html")
+        build_html(slides_data, html_path, logo_path, logo_dark_path)
+        if not tg_document(html_path, caption=f"{title} — .html (import ke Figma pakai plugin html.to.design → teks jadi 1 kotak editable) ✨"):
+            tg_message("⚠️ File .html gagal dikirim (cek log).")
 
     # ---- tombol penilaian (1x pencet langsung selesai) utk sistem belajar ----
     if LEARN_ENABLED and mem is not None:
