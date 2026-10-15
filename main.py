@@ -84,6 +84,31 @@ G_SOFT       = 0.0   # tambahan "film/soft" (0 = normal, makin besar makin lembu
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
+# --- cache desain: simpan gambar tiap slide biar revisi bisa PAKAI ULANG (per-slide) ---
+CACHE_DIR = os.environ.get("CACHE_DIR") or "design_cache"
+def _pid_norm(pid):
+    return (pid or "").replace("-", "")
+def _page_cache_dir(pid):
+    d = os.path.join(CACHE_DIR, _pid_norm(pid))
+    os.makedirs(d, exist_ok=True)
+    return d
+def _content_hash(s):
+    import hashlib
+    return hashlib.md5((s or "").encode("utf-8")).hexdigest()[:12]
+def _slide_nums_in(text):
+    """Ambil nomor slide yg disebut user, mis. 'slide 3' / 'slide 2 dan 4' -> [3] / [2,4]."""
+    import re as _re
+    low = (text or "").lower()
+    nums = []
+    for mt in _re.finditer(r"slide\s*(\d{1,2})((?:\s*(?:,|dan|serta|&|/|\+)\s*\d{1,2})*)", low):
+        nums.append(int(mt.group(1)))
+        nums += [int(x) for x in _re.findall(r"\d{1,2}", mt.group(2))]
+    seen, out = set(), []
+    for n in nums:
+        if n not in seen:
+            seen.add(n); out.append(n)
+    return out
+
 
 # ======================================================================
 # 1. TEKNIS (Secrets)
@@ -1226,7 +1251,8 @@ DEFAULT_MEMORY = {
     "pending": {},        # token -> {title, page_id, ts, revision}
     "resolved": [],       # token yang sudah dinilai (anti dobel)
     "awaiting_text": None,  # token yang menunggu alasan ketik
-    "revise_queue": {},   # page_id -> {title, revision, reasons[]} konten yg minta direvisi
+    "revise_queue": {},   # page_id -> {title, revision, reasons[], new_photo, slides[]} konten yg minta direvisi
+    "design_cache": {},   # page_id -> {hash, n, title, slides:{i:{theme,style}}} utk revisi pakai-ulang gambar
     "log": [],            # riwayat {ts, title, status, reason}
     "stats": {"approved": 0, "rejected": 0, "weekly": []},
     "tg_offset": 0,
@@ -1366,8 +1392,15 @@ Contoh yang HARUS "revise": "gambar kurang bagus", "kurang aesthetic", "ganti fo
 Kalau user komentarin/minta ganti foto, set action "revise" (foto otomatis diganti baru saat revisi).
 Pakai action "none" HANYA kalau pesan jelas cuma sapaan/basa-basi/terima kasih/pertanyaan umum
 (mis. "halo", "makasih", "lagi apa") — BUKAN komentar soal desain.
+TAMBAHAN PENTING (revisi per-bagian):
+- "new_photo": true HANYA kalau user minta GANTI GAMBAR/FOTO (mis. "ganti foto", "gambar jelek",
+  "gambar kurang bagus/aesthetic", "fotonya nggak cocok"). Kalau cuma soal TEKS/ukuran/overlay/warna
+  (mis. "judul kegedean", "overlay kurang gelap", "teks kurang jelas") -> new_photo = false
+  (gambar lama DIPAKAI ULANG, nggak diganti).
+- "slides": daftar nomor slide yg disebut user (mis. "slide 3 ganti foto" -> [3];
+  "slide 2 dan 4" -> [2,4]). Kalau user TIDAK sebut nomor slide -> [] (artinya berlaku semua slide).
 Balas HANYA JSON valid, tanpa teks lain:
-{"head_scale_delta": <angka -0.12..0.12>, "body_scale_delta": <angka>, "scrim_delta": <angka>, "soft_delta": <angka>, "note": "<ringkasan singkat dalam bahasa Indonesia, maks 12 kata>", "action": "revise" atau "none"}
+{"head_scale_delta": <angka -0.12..0.12>, "body_scale_delta": <angka>, "scrim_delta": <angka>, "soft_delta": <angka>, "new_photo": true/false, "slides": [<nomor>], "note": "<ringkasan singkat dalam bahasa Indonesia, maks 12 kata>", "action": "revise" atau "none"}
 Pesan user: "%s" """
 
 def ai_parse_command(text):
@@ -1464,18 +1497,29 @@ def ai_vision_check(image_path, zone, theme):
         return None
     return {"ok": bool(data.get("ok", True)), "issue": str(data.get("issue") or "").strip()}
 
-def _queue_revision(mem, rec, reason_label):
-    """Masukkan konten ke antrian revisi (biar run berikutnya di-generate ulang)."""
+def _queue_revision(mem, rec, reason_label, new_photo=False, slides=None):
+    """Masukkan konten ke antrian revisi (biar run berikutnya di-generate ulang).
+    new_photo=True -> ambil gambar baru; slides=[] -> semua slide, [3] -> cuma slide 3."""
     page_id = ((rec or {}).get("page_id") or "").replace("-", "")   # normalisasi kunci
     if not page_id:
         return False
     rev = (rec or {}).get("revision", 0)
     q = mem.setdefault("revise_queue", {})
-    entry = q.get(page_id) or {"title": (rec or {}).get("title", "desain"), "revision": rev, "reasons": []}
+    entry = q.get(page_id) or {"title": (rec or {}).get("title", "desain"), "revision": rev,
+                               "reasons": [], "new_photo": False}
     entry["title"] = (rec or {}).get("title", entry.get("title", "desain"))
     entry["revision"] = rev + 1
     entry["reasons"].append(reason_label)
     entry["reasons"] = entry["reasons"][-8:]
+    # gabung permintaan: new_photo = OR; slides = gabung ([] = semua slide, jadi menang)
+    entry["new_photo"] = bool(entry.get("new_photo")) or bool(new_photo)
+    new = list(slides or [])
+    if "slides" not in entry:
+        entry["slides"] = new               # permintaan pertama: ikut apa adanya
+    elif entry["slides"] == [] or new == []:
+        entry["slides"] = []                # ada yg minta "semua" -> semua
+    else:
+        entry["slides"] = sorted(set(entry["slides"]) | set(new))
     q[page_id] = entry
     return True
 
@@ -1531,15 +1575,29 @@ def process_feedback(mem):
                     continue
                 note = (data or {}).get("note") or text[:80]
                 ch = apply_ai(prefs, data) if data else []
+                # --- revisi per-bagian: tentuin ganti-foto? slide mana? ---
+                _photo_kata = ("ganti foto", "ganti gambar", "foto baru", "gambar baru",
+                               "gambar jelek", "foto jelek", "gambar kurang", "foto kurang",
+                               "gambar nggak", "foto nggak", "aesthetic", "estetik")
+                new_photo = bool((data or {}).get("new_photo")) or any(k in low for k in _photo_kata)
+                slides = (data or {}).get("slides") or _slide_nums_in(text)
+                try:
+                    slides = [int(x) for x in slides]
+                except Exception:
+                    slides = _slide_nums_in(text)
                 latest = _latest_pending(mem)
                 if latest:
                     tok, rec = latest
-                    _queue_revision(mem, rec, "chat: " + note)
+                    _queue_revision(mem, rec, "chat: " + note, new_photo=new_photo, slides=slides)
                     mem["pending"].pop(tok, None); _mark_resolved(mem, tok)
                     mem["stats"]["rejected"] += 1
                     extra = ("\n" + prefs_summary(prefs)) if ch else ""
-                    tail = "" if data else " (AI lagi nggak aktif, jadi gw revisi dgn foto baru aja)"
-                    tg_message(f"🧠 Paham: {note}. Gw revisi '{rec.get('title','desain')}' ya{tail}.{extra}")
+                    if new_photo:
+                        where = ("slide " + ", ".join(map(str, slides))) if slides else "semua slide"
+                        seg = f" Foto {where} gw ganti baru."
+                    else:
+                        seg = " Gambar lama tetep dipakai, cuma teks/overlay yg disesuaikan."
+                    tg_message(f"🧠 Paham: {note}.{seg} Gw revisi '{rec.get('title','desain')}' ya.{extra}")
                 else:
                     if ch:
                         tg_message(f"🧠 Paham: {note}. Setelan disesuaikan, kepakai di desain berikutnya.\n{prefs_summary(prefs)}")
@@ -1593,7 +1651,9 @@ def process_feedback(mem):
                 desc = apply_reason(prefs, code)
                 mem["pending"].pop(tok, None)
                 _mark_resolved(mem, tok); processed += 1
-                ok = _queue_revision(mem, rec, REASON_LABEL.get(code, code))
+                # tombol "Gambar kurang aesthetic" (code 'img') -> minta foto baru; lainnya pakai gambar lama
+                ok = _queue_revision(mem, rec, REASON_LABEL.get(code, code),
+                                     new_photo=(code == "img"), slides=[])
                 print(f"  reject({code}) pid={rec.get('page_id')} queued={ok}")
                 mem["log"].append({"ts": int(time.time()), "title": rec["title"],
                                    "status": "rejected", "reason": REASON_LABEL.get(code, code)})
@@ -1660,6 +1720,21 @@ def process_page(page, workdir, mem=None, revision=None):
 
     print(f"  -> '{title}' | {fmt} | {len(slide_blocks)} slide")
 
+    # --- REVISI PER-SLIDE: pakai ulang gambar lama kalau cache cocok ---
+    pid_norm = _pid_norm(page_id)
+    content_hash = _content_hash(content)
+    rev_reuse = None
+    if revision and mem is not None:
+        _c = mem.get("design_cache", {}).get(pid_norm)
+        if _c and _c.get("hash") == content_hash:
+            _np = bool((revision or {}).get("new_photo"))
+            _sl = set((revision or {}).get("slides") or [])
+            rev_reuse = {"cache": _c, "new_photo": _np, "slides": _sl}
+            print(f"  [revisi: cache cocok. new_photo={_np}, slide target={sorted(_sl) or 'semua'}]")
+        else:
+            print("  [revisi: cache nggak ada/konten berubah -> generate ulang penuh]")
+    slide_cache = {}
+
     slides_data, preview_paths, credits = [], [], []
     vision_notes = []           # catatan cek mandiri (AI vision)
     used_ids = set()
@@ -1723,6 +1798,15 @@ def process_page(page, workdir, mem=None, revision=None):
             if base is None:
                 print(f"    ! gambar custom slide {i} gagal -> pakai foto stok")
 
+        # --- REVISI: pakai ulang gambar lama (kecuali slide ini diminta ganti foto) ---
+        if base is None and rev_reuse is not None:
+            refetch = rev_reuse["new_photo"] and (not rev_reuse["slides"] or i in rev_reuse["slides"])
+            cpath = os.path.join(_page_cache_dir(page_id), f"slide_{i}.png")
+            if (not refetch) and os.path.exists(cpath):
+                base = Image.open(cpath).convert("RGB")
+                theme = (rev_reuse["cache"].get("slides", {}).get(str(i)) or {}).get("theme") or (forced_theme or "dark")
+                print(f"    slide {i}: gambar lama dipakai ulang")
+
         if base is None:
             # jalur normal: cari foto stok
             explicit = keyword_blocks[i - 1].strip() if (i - 1) < len(keyword_blocks) else ""
@@ -1765,6 +1849,12 @@ def process_page(page, workdir, mem=None, revision=None):
 
         clean_path = os.path.join(workdir, f"clean_{i}.png")
         base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
+        # simpan gambar bersih ke CACHE (buat revisi pakai-ulang per-slide)
+        try:
+            base.save(os.path.join(_page_cache_dir(page_id), f"slide_{i}.png"), "PNG")
+            slide_cache[str(i)] = {"theme": theme, "style": eff_style}
+        except Exception as _ce:
+            print("    ! gagal simpan cache slide:", _ce)
         img_path = os.path.join(workdir, f"slide_{i}.png")
         if theme == "dark":
             bake_scrim(base, zone, img_path)                # overlay gelap (gaya gelap/duotone)
@@ -1787,6 +1877,12 @@ def process_page(page, workdir, mem=None, revision=None):
             else:
                 vision_notes.append("Cover: ✅ aman")
                 print("    [vision cover] aman")
+
+    # simpan metadata cache (biar revisi berikutnya bisa pakai-ulang gambar ini)
+    if mem is not None and slide_cache:
+        mem.setdefault("design_cache", {})[pid_norm] = {
+            "hash": content_hash, "n": total, "title": title,
+            "slides": slide_cache, "ts": int(time.time())}
 
     safe_name = re.sub(r"[^\w\- ]", "", title).strip().replace(" ", "_")[:40] or "desain"
     logo_path = download_logo_path()
