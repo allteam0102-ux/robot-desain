@@ -964,8 +964,9 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
               color="FFFFFF", band=None):
     """
     Teks OTOMATIS TURUN BARIS (wrap) biar PAS di dalam frame (nggak meleber).
-    Tiap baris hasil wrap = satu <text> (anchor start, x digeser manual utk
-    center/right). Stabilo (==) & miring (_) tetap jalan inline.
+    Hasil: SATU <text> per blok (judul/isi) berisi <tspan> per baris -> di Figma
+    jadi 1 layer/paragraf yang gampang diedit (bukan banyak layer kepisah).
+    Stabilo (==) & miring (_) tetap jalan inline.
     'color' = warna teks biasa (FFFFFF utk bg gelap, 222222 utk bg terang).
     """
     weight = "700" if bold else "400"
@@ -982,7 +983,7 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
                     res.append((w, hl, it, tl))
         return res
 
-    out = []
+    rects, tspans = [], []
     yy = y
     for para in text.split("\n"):
         ws = words_of(para)
@@ -1025,13 +1026,17 @@ def _svg_text(text, x, y, width, size, bold, font, anchor="start", highlight=Fal
                 rh = int(size * 1.02)
                 rx = int(size * 0.10)
                 bw = int(len(line_str) * size * 0.64)   # estimasi lebar teks utk sapuan (lebih lebar dr _est_w)
-                out.append(f'<rect x="{lx - pad}" y="{ry}" width="{bw + 2 * pad}" '
-                           f'height="{rh}" rx="{rx}" fill="#{band}" fill-opacity="0.88"/>')
-            out.append(f'<text x="{lx}" y="{int(base)}" text-anchor="start" xml:space="preserve" '
-                       f'fill="#{color}" font-family="{_svg_escape(font)}, Arial, sans-serif" '
-                       f'font-size="{size}" font-weight="{weight}">{frag}</text>')
+                rects.append(f'<rect x="{lx - pad}" y="{ry}" width="{bw + 2 * pad}" '
+                             f'height="{rh}" rx="{rx}" fill="#{band}" fill-opacity="0.88"/>')
+            # tiap baris = <tspan> di dalam SATU <text> -> 1 layer/paragraf di Figma (gampang diedit)
+            tspans.append(f'<tspan x="{lx}" y="{int(base)}" xml:space="preserve">{frag}</tspan>')
             yy += lh
-    return "\n".join(out)
+    if not tspans:
+        return ""
+    text_el = ('<text text-anchor="start" '
+               f'fill="#{color}" font-family="{_svg_escape(font)}, Arial, sans-serif" '
+               f'font-size="{size}" font-weight="{weight}">' + "".join(tspans) + "</text>")
+    return "\n".join(rects + [text_el])
 
 
 # ---------- masking versi VEKTOR (editable di Figma) ----------
