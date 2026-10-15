@@ -1198,6 +1198,23 @@ def _html_rich(text):
         lines.append(frag)
     return "<br>".join(lines)
 
+def _html_scrim(zone):
+    """Overlay gelap (masking) sebagai div CSS TERPISAH dari foto -> editable sendiri di Figma.
+    Gradasi disamain sama versi SVG per-zona + strip atas (logo/tagline) & bawah (footer/CTA)."""
+    H = CANVAS_H
+    main = {
+        "top":    "linear-gradient(to bottom, rgba(0,0,0,.80) 0%, rgba(0,0,0,0) 55%, rgba(0,0,0,0) 100%)",
+        "left":   "linear-gradient(to right, rgba(0,0,0,.80) 0%, rgba(0,0,0,0) 60%, rgba(0,0,0,0) 100%)",
+        "right":  "linear-gradient(to right, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 40%, rgba(0,0,0,.80) 100%)",
+        "center": "radial-gradient(ellipse 80% 80% at 50% 50%, rgba(0,0,0,.60) 0%, rgba(0,0,0,.06) 100%)",
+        "bottom": "linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 42%, rgba(0,0,0,.88) 100%)",
+    }.get(zone, "linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 42%, rgba(0,0,0,.88) 100%)")
+    return (
+        f'<div class="ov" style="background:{main}"></div>'
+        f'<div class="ov" style="height:{int(0.16*H)}px;background:linear-gradient(to bottom, rgba(0,0,0,.45), rgba(0,0,0,0))"></div>'
+        f'<div class="ov" style="top:{int(0.86*H)}px;height:{int(0.14*H)}px;background:linear-gradient(to bottom, rgba(0,0,0,0), rgba(0,0,0,.55))"></div>'
+    )
+
 def build_html(slides_data, out_path, logo_path, logo_dark_path=None):
     W, H = CANVAS_W, CANVAS_H
     logo_uri = _img_data_uri(logo_path) if logo_path else None
@@ -1208,6 +1225,7 @@ body{{background:#444;}}
 .slide{{position:relative;width:{W}px;height:{H}px;overflow:hidden;
   font-family:'{HEADLINE_FONT}','Montserrat',Arial,sans-serif;margin:0 auto 24px;}}
 .bg{{position:absolute;inset:0;width:{W}px;height:{H}px;object-fit:cover;}}
+.ov{{position:absolute;left:0;top:0;width:{W}px;height:{H}px;}}
 .logo{{position:absolute;left:{int(0.06*W)}px;top:{int(0.045*H)}px;height:{int(0.05*H)}px;}}
 .tagline{{position:absolute;right:{int(0.06*W)}px;top:{int(0.05*H)}px;
   font-weight:700;font-size:26px;text-align:right;}}
@@ -1238,7 +1256,13 @@ body{{background:#444;}}
             tag_txt, body_txt = "222222", "222222"
         else:
             tag_txt, body_txt = "FFFFFF", "FFFFFF"
-        parts = [f'<img class="bg" src="{_img_data_uri(s.get("image_path"))}">']
+        # foto BERSIH + overlay gelap TERPISAH (biar masking editable sendiri di Figma)
+        bgp = s.get("clean_path") or s.get("image_path")
+        parts = []
+        if bgp:
+            parts.append(f'<img class="bg" src="{_img_data_uri(bgp)}">')
+            if theme == "dark" and s.get("kind") != "cta":
+                parts.append(_html_scrim(s.get("zone", "bottom")))
         use_logo = logo_dark_uri if (theme == "light" and logo_dark_uri) else logo_uri
         if use_logo:
             parts.append(f'<img class="logo" src="{use_logo}">')
