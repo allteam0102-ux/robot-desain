@@ -1483,9 +1483,9 @@ GROQ_API_KEY    = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL      = os.environ.get("GROQ_MODEL") or "openai/gpt-oss-20b"
 AI_CHAT_ENABLED = ((os.environ.get("AI_CHAT_ENABLED") or "true").lower() == "true"
                    and (bool(GEMINI_API_KEY) or bool(GROQ_API_KEY)))
-# cek mandiri pakai 'mata' AI (Gemini vision). gratis (gambar sbg INPUT), cuma butuh Gemini key.
+# cek mandiri pakai 'mata' AI (Groq/Gemini vision). aktif kalau salah satu key ada.
 VISION_CHECK_ENABLED = ((os.environ.get("VISION_CHECK_ENABLED") or "true").lower() == "true"
-                        and bool(GEMINI_API_KEY))
+                        and (bool(GEMINI_API_KEY) or bool(GROQ_API_KEY)))
 
 def _gemini_json(prompt):
     if not GEMINI_API_KEY:
@@ -1628,12 +1628,8 @@ def ai_image_keywords(slide_texts):
         pass
     return None
 
-def _extract_json(resp):
-    """Ambil JSON dari balasan Gemini walau dibungkus teks/markdown (```json ... ```)."""
-    try:
-        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception:
-        return None
+def _json_from_text(raw):
+    """Ambil objek JSON dari teks walau dibungkus markdown (```json ... ```) atau prosa."""
     raw = (raw or "").strip()
     if raw.startswith("```"):
         raw = raw.strip("`")
@@ -1651,6 +1647,66 @@ def _extract_json(resp):
             return json.loads(mobj.group(0))
         except Exception:
             return None
+    return None
+
+def _extract_json(resp):
+    """Ambil JSON dari balasan Gemini (response object)."""
+    try:
+        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        return None
+    return _json_from_text(raw)
+
+# ---- MATA AI pakai GROQ (gratis, jatah longgar) ----
+GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL") or "meta-llama/llama-4-scout-17b-16e-instruct"
+VISION_PRIMARY = (os.environ.get("VISION_PRIMARY") or "groq").lower()   # 'groq' (gratis) atau 'gemini'
+
+def _groq_vision_json(prompt, image_path):
+    """Kirim gambar + pertanyaan ke Groq (vision). Groq jatah gratisnya longgar & jarang overload."""
+    if not GROQ_API_KEY:
+        return None
+    try:
+        im = Image.open(image_path).convert("RGB")
+        im.thumbnail((768, 768))
+        buf = io.BytesIO(); im.save(buf, "JPEG", quality=82)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        print("    ! Groq vision siapin gambar gagal:", e); return None
+    data_uri = "data:image/jpeg;base64," + b64
+    body = {"model": GROQ_VISION_MODEL, "temperature": 0.2,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_uri}}]}]}
+    for attempt in range(3):
+        try:
+            r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                              headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                              json=body, timeout=60)
+        except Exception as e:
+            print("    ! Groq vision error:", e); return None
+        if r.status_code == 200:
+            try:
+                raw = r.json()["choices"][0]["message"]["content"]
+            except Exception:
+                return None
+            return _json_from_text(raw)
+        if r.status_code in (429, 500, 502, 503):
+            print(f"    ! Groq vision {r.status_code} (coba lagi {attempt+1}/3)")
+            time.sleep(1.2 * (attempt + 1)); continue
+        print(f"    ! Groq vision {r.status_code}: {r.text[:120]}")
+        return None
+    return None
+
+def vision_json(prompt, image_path):
+    """MATA AI terpadu: coba provider utama (default Groq = gratis & jarang overload), lalu cadangan.
+    Jadi kalau satu error/kuota abis, otomatis pindah — fitur AI nggak gampang mati."""
+    order = ([("Gemini", _gemini_vision_json), ("Groq", _groq_vision_json)]
+             if VISION_PRIMARY == "gemini"
+             else [("Groq", _groq_vision_json), ("Gemini", _gemini_vision_json)])
+    for name, fn in order:
+        res = fn(prompt, image_path)
+        if isinstance(res, dict):
+            return res
     return None
 
 def _gemini_vision_json(prompt, image_path):
@@ -1706,7 +1762,7 @@ def ai_vision_check(image_path, zone, theme):
         'Balas HANYA JSON: {"ok": true atau false, "issue": "<masalah singkat bahasa Indonesia maks 12 kata; '
         'kosongkan kalau sudah ok>"}'
     )
-    data = _gemini_vision_json(prompt, image_path)   # 1x aja (retry malah boros kuota)
+    data = vision_json(prompt, image_path)   # Groq dulu (gratis), Gemini cadangan
     if not isinstance(data, dict):
         return None
     return {"ok": bool(data.get("ok", True)), "issue": str(data.get("issue") or "").strip()}
@@ -1714,7 +1770,7 @@ def ai_vision_check(image_path, zone, theme):
 def ai_learn_from_example(image_path):
     """Baca FOTO CONTOH yg dikirim user -> tangkap 'vibe'-nya jadi setelan (knob).
     Kembalikan {head_scale, body_scale, scrim, soft, note} atau None kalau gagal."""
-    if not GEMINI_API_KEY:
+    if not (GROQ_API_KEY or GEMINI_API_KEY):
         return None
     prompt = (
         "Kamu art director. Ini FOTO CONTOH desain konten Instagram yang DISUKAI user; "
@@ -1728,7 +1784,7 @@ def ai_learn_from_example(image_path):
         'Balas HANYA JSON: {"head_scale": <angka>, "body_scale": <angka>, "scrim": <angka>, '
         '"soft": <angka>, "note": "<ciri gaya foto ini, bahasa Indonesia, maks 15 kata>"}'
     )
-    data = _gemini_vision_json(prompt, image_path)
+    data = vision_json(prompt, image_path)
     return data if isinstance(data, dict) else None
 
 def _queue_revision(mem, rec, reason_label, new_photo=False, slides=None):
