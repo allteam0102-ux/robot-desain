@@ -546,6 +546,81 @@ def crop_canvas(im):
         nh = int(w / target); y = (h - nh) // 2; im = im.crop((0, y, w, y + nh))
     return im.resize((CANVAS_W, CANVAS_H), Image.LANCZOS)
 
+# ---- AUTO-CROP CERDAS (full-AI): crop ke bagian foto yg paling nyambung sama konteks slide ----
+SMART_CROP_ENABLED = (os.environ.get("SMART_CROP") or "true").lower() == "true"
+
+def _box_crop_to_aspect(im, box_px, target):
+    """Crop im jadi rasio `target`, se-ketat mungkin TAPI wajib memuat box_px (x0,y0,x1,y1).
+    Subjek kecil -> otomatis zoom; subjek besar/pas -> nyaris full (tanpa zoom berlebih)."""
+    W, H = im.size
+    bx0, by0, bx1, by1 = box_px
+    bw = max(1.0, bx1 - bx0); bh = max(1.0, by1 - by0)
+    cx = (bx0 + bx1) / 2.0; cy = (by0 + by1) / 2.0
+    cw = max(bw, bh * target); ch = cw / target
+    if ch < bh:
+        ch = bh; cw = ch * target
+    cw = min(cw, W); ch = min(ch, H)
+    if cw / ch > target:
+        cw = ch * target
+    else:
+        ch = cw / target
+    x0 = cx - cw / 2.0; y0 = cy - ch / 2.0
+    x0 = max(0, min(W - cw, x0)); y0 = max(0, min(H - ch, y0))
+    im2 = im.crop((int(round(x0)), int(round(y0)), int(round(x0 + cw)), int(round(y0 + ch))))
+    return im2.resize((CANVAS_W, CANVAS_H), Image.LANCZOS)
+
+def ai_focus_box(image_path, context):
+    """Tanya MATA AI: bagian foto mana yg PALING nyambung sama konteks slide.
+    Balikin (x,y,w,h) fraksi 0..1, atau None kalau gagal."""
+    if not (GROQ_API_KEY or GEMINI_API_KEY):
+        return None
+    prompt = (
+        "Kamu fotografer/editor. Ini satu FOTO untuk konten Instagram.\n"
+        f"Konteks/topik slide: \"{(context or '').strip()[:200]}\".\n"
+        "Tentukan KOTAK bagian foto yang PALING relevan & penting untuk konteks ini "
+        "(boleh objek/subjek yang paling nyambung dengan topik, BUKAN selalu yang paling menonjol). "
+        "Jaga wajah/objek penting tetap utuh (jangan kepotong).\n"
+        "Nilai dalam FRAKSI 0..1 relatif ukuran foto: x,y = pojok kiri-atas kotak; w,h = lebar,tinggi.\n"
+        'Balas HANYA JSON: {"x":<0..1>,"y":<0..1>,"w":<0..1>,"h":<0..1>}'
+    )
+    d = vision_json(prompt, image_path)
+    try:
+        x = float(d["x"]); y = float(d["y"]); w = float(d["w"]); h = float(d["h"])
+    except Exception:
+        return None
+    if not (0 <= x <= 1 and 0 <= y <= 1 and 0 < w <= 1 and 0 < h <= 1):
+        return None
+    if x + w > 1: w = 1 - x
+    if y + h > 1: h = 1 - y
+    return (x, y, w, h)
+
+def smart_crop_canvas(im, context=""):
+    """Crop ke kanvas. SMART_CROP aktif + ada konteks -> crop sesuai AI (zoom ke bagian relevan);
+    gagal/mati -> balik ke crop tengah biasa (crop_canvas), jadi nggak pernah macet."""
+    if SMART_CROP_ENABLED and context and (GROQ_API_KEY or GEMINI_API_KEY):
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(suffix=".jpg"); os.close(fd)
+            im.convert("RGB").save(tmp, "JPEG", quality=88)
+            box = ai_focus_box(tmp, context)
+            if box:
+                W, H = im.size
+                x, y, w, h = box
+                pad = 0.10
+                bx0 = max(0, (x - pad) * W); by0 = max(0, (y - pad) * H)
+                bx1 = min(W, (x + w + pad) * W); by1 = min(H, (y + h + pad) * H)
+                if bx1 - bx0 >= 8 and by1 - by0 >= 8:
+                    print(f"    [smart-crop] fokus box={tuple(round(v, 2) for v in box)}")
+                    return _box_crop_to_aspect(im, (bx0, by0, bx1, by1), CANVAS_W / CANVAS_H)
+        except Exception as e:
+            print("    ! smart-crop gagal, pakai crop tengah:", e)
+        finally:
+            try:
+                if tmp and os.path.exists(tmp): os.remove(tmp)
+            except Exception:
+                pass
+    return crop_canvas(im)
+
 def film_grade(im):
     """Sentuhan film halus: saturasi sedikit turun, kontras tipis, hangat tipis."""
     if not FILM_GRADE:
@@ -2129,7 +2204,7 @@ def process_page(page, workdir, mem=None, revision=None):
             if cdata is not None:
                 try:
                     cim = Image.open(io.BytesIO(cdata)).convert("RGB")
-                    base = crop_canvas(cim)         # gambar sendiri: JANGAN di-film-grade (biar doodle tetap bersih)
+                    base = smart_crop_canvas(cim, (headline + " " + body))  # gambar sendiri: JANGAN di-film-grade (biar doodle tetap bersih)
                     theme = pick_theme(base, forced_theme)
                     is_custom = True
                     credits.append(f"Slide {i}: (gambar sendiri / custom, tema {theme})")
@@ -2164,7 +2239,7 @@ def process_page(page, workdir, mem=None, revision=None):
             else:
                 im = make_placeholder()
                 credits.append(f"Slide {i}: (background netral — gambar '{q}' tak ditemukan)")
-            graded = film_grade(crop_canvas(im))
+            graded = film_grade(smart_crop_canvas(im, (headline + " " + body)))
             # terapkan GAYA ke foto stok
             if eff_style == "duotone":
                 base = duotone_teal(graded); theme = "dark"
