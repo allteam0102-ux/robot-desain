@@ -126,6 +126,11 @@ PEXELS_API_KEY      = env("PEXELS_API_KEY", required=True)
 TELEGRAM_BOT_TOKEN  = env("TELEGRAM_BOT_TOKEN", required=True)
 TELEGRAM_CHAT_ID    = env("TELEGRAM_CHAT_ID", required=True)
 UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")   # opsional (utama kalau diisi)
+# SUMBER PRIBADI: ambil dari collection akun sendiri (isi ID collection, pisah koma). Kosong = fitur mati.
+UNSPLASH_COLLECTIONS = (os.environ.get("UNSPLASH_COLLECTIONS") or "").strip()
+PEXELS_COLLECTIONS   = (os.environ.get("PEXELS_COLLECTIONS") or "").strip()
+# true = HANYA pakai foto simpenan (nggak cari ke internet umum); false = simpenan dulu, internet cadangan
+PERSONAL_IMAGES_ONLY = (os.environ.get("PERSONAL_IMAGES_ONLY") or "false").lower() == "true"
 
 TITLE_PROPERTY   = env("TITLE_PROPERTY", "Judul")
 STATUS_PROPERTY  = env("STATUS_PROPERTY", "Status")
@@ -434,7 +439,101 @@ def unsplash_pick(query, used_ids):
     name = (photo.get("user") or {}).get("name", "-")
     return requests.get(img_url, timeout=60).content, f"Foto: {name} (Unsplash)"
 
+def _unsplash_collection_random(used_ids):
+    """Ambil foto ACAK dari collection(s) Unsplash milik user (tanpa keyword)."""
+    ids = [c.strip() for c in UNSPLASH_COLLECTIONS.split(",") if c.strip()]
+    random.shuffle(ids)
+    for cid in ids:
+        try:
+            r = requests.get(f"https://api.unsplash.com/collections/{cid}/photos",
+                             headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+                             params={"per_page": 30, "orientation": PEXELS_ORIENTATION}, timeout=60)
+            if r.status_code != 200:
+                print(f"    ! Unsplash collection {cid} {r.status_code}"); continue
+            results = r.json()
+            if not isinstance(results, list) or not results:
+                continue
+            fresh = [p for p in results if p.get("id") not in used_ids] or results
+            photo = random.choice(fresh)
+            if photo.get("id"): used_ids.add(photo["id"])
+            urls = photo.get("urls", {})
+            img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
+            name = (photo.get("user") or {}).get("name", "-")
+            return requests.get(img_url, timeout=60).content, f"Foto: {name} (Unsplash, koleksi kamu)"
+        except Exception as e:
+            print(f"    ! Unsplash collection {cid} gagal:", e)
+    return None, None
+
+def unsplash_pick_collection(query, used_ids):
+    """Cari foto RELEVAN di dalam collection user (keyword match); kalau nggak ada -> acak dari collection."""
+    try:
+        r = requests.get("https://api.unsplash.com/search/photos",
+                         headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+                         params={"query": _short_q(query, add_hint=False), "per_page": 15,
+                                 "orientation": PEXELS_ORIENTATION,
+                                 "collections": UNSPLASH_COLLECTIONS}, timeout=60)
+        if r.status_code == 200:
+            results = r.json().get("results", [])
+            fresh = [p for p in results if p.get("id") not in used_ids] or results
+            if fresh:
+                photo = random.choice(fresh[:8])
+                if photo.get("id"): used_ids.add(photo["id"])
+                urls = photo.get("urls", {})
+                img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
+                name = (photo.get("user") or {}).get("name", "-")
+                return requests.get(img_url, timeout=60).content, f"Foto: {name} (Unsplash, koleksi kamu)"
+        else:
+            print(f"    ! Unsplash collection search {r.status_code}")
+    except Exception as e:
+        print("    ! Unsplash collection search gagal:", e)
+    return _unsplash_collection_random(used_ids)   # nggak ada yg match -> ambil apa aja dari koleksi
+
+def pexels_pick_collection(query, used_ids):
+    """Ambil foto dari collection(s) Pexels milik user (acak, hindari yg udah kepake)."""
+    ids = [c.strip() for c in PEXELS_COLLECTIONS.split(",") if c.strip()]
+    random.shuffle(ids)
+    for cid in ids:
+        try:
+            r = requests.get(f"https://api.pexels.com/v1/collections/{cid}",
+                             headers={"Authorization": PEXELS_API_KEY},
+                             params={"per_page": 80, "type": "photos"}, timeout=60)
+            if r.status_code != 200:
+                print(f"    ! Pexels collection {cid} {r.status_code}"); continue
+            media = [m for m in r.json().get("media", []) if (m.get("type") or "").lower() == "photo"]
+            if not media:
+                continue
+            fresh = [m for m in media if m.get("id") not in used_ids] or media
+            photo = random.choice(fresh)
+            if photo.get("id"): used_ids.add(photo["id"])
+            src = photo.get("src", {})
+            img_url = src.get("large2x") or src.get("large") or src.get("original")
+            if not img_url:
+                continue
+            return requests.get(img_url, timeout=60).content, f'Foto: {photo.get("photographer","-")} (Pexels, koleksi kamu)'
+        except Exception as e:
+            print(f"    ! Pexels collection {cid} gagal:", e)
+    return None, None
+
 def image_pick(query, used_ids):
+    # 1) SUMBER PRIBADI dulu: collection akun user (kalau diisi)
+    if UNSPLASH_COLLECTIONS and UNSPLASH_ACCESS_KEY:
+        try:
+            data, credit = unsplash_pick_collection(query, used_ids)
+            if data:
+                return data, credit
+        except Exception as e:
+            print("    ! sumber Unsplash pribadi gagal:", e)
+    if PEXELS_COLLECTIONS:
+        try:
+            data, credit = pexels_pick_collection(query, used_ids)
+            if data:
+                return data, credit
+        except Exception as e:
+            print("    ! sumber Pexels pribadi gagal:", e)
+    # kalau user mau HANYA foto simpenan & memang sudah set collection -> stop (jangan ke internet umum)
+    if PERSONAL_IMAGES_ONLY and (UNSPLASH_COLLECTIONS or PEXELS_COLLECTIONS):
+        return None, None
+    # 2) CADANGAN: cari di internet umum (perilaku lama)
     sources = (["unsplash", "pexels"] if UNSPLASH_ACCESS_KEY else ["pexels"])
     for q in [query] + FALLBACK_QUERIES:
         for src in sources:
