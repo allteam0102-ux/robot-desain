@@ -1659,7 +1659,7 @@ def _extract_json(resp):
 
 # ---- MATA AI pakai GROQ (gratis, jatah longgar) ----
 GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL") or "meta-llama/llama-4-scout-17b-16e-instruct"
-VISION_PRIMARY = (os.environ.get("VISION_PRIMARY") or "groq").lower()   # 'groq' (gratis) atau 'gemini'
+VISION_PRIMARY = (os.environ.get("VISION_PRIMARY") or "gemini").lower()   # 'gemini' (akun Groq blm punya model vision) / 'groq'
 
 def _groq_vision_json(prompt, image_path):
     """Kirim gambar + pertanyaan ke Groq (vision). Groq jatah gratisnya longgar & jarang overload."""
