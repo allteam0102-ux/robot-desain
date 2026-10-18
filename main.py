@@ -128,6 +128,7 @@ TELEGRAM_CHAT_ID    = env("TELEGRAM_CHAT_ID", required=True)
 UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")   # opsional (utama kalau diisi)
 # SUMBER PRIBADI: ambil dari collection akun sendiri (isi ID collection, pisah koma). Kosong = fitur mati.
 UNSPLASH_COLLECTIONS = (os.environ.get("UNSPLASH_COLLECTIONS") or "").strip()
+UNSPLASH_LIKES_USER  = (os.environ.get("UNSPLASH_LIKES_USER") or "").strip()   # username Unsplash -> ambil dari foto yg di-Like (❤️)
 PEXELS_COLLECTIONS   = (os.environ.get("PEXELS_COLLECTIONS") or "").strip()
 # true = HANYA pakai foto simpenan (nggak cari ke internet umum); false = simpenan dulu, internet cadangan
 PERSONAL_IMAGES_ONLY = (os.environ.get("PERSONAL_IMAGES_ONLY") or "false").lower() == "true"
@@ -488,6 +489,31 @@ def unsplash_pick_collection(query, used_ids):
         print("    ! Unsplash collection search gagal:", e)
     return _unsplash_collection_random(used_ids)   # nggak ada yg match -> ambil apa aja dari koleksi
 
+def unsplash_pick_likes(used_ids):
+    """Ambil foto dari LIKES (❤️) akun Unsplash user (acak). Publik, cuma butuh username."""
+    if not (UNSPLASH_LIKES_USER and UNSPLASH_ACCESS_KEY):
+        return None, None
+    for page in (random.randint(1, 3), 1):   # variasi dikit (likes urut terbaru)
+        try:
+            r = requests.get(f"https://api.unsplash.com/users/{UNSPLASH_LIKES_USER}/likes",
+                             headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+                             params={"per_page": 30, "page": page, "orientation": PEXELS_ORIENTATION}, timeout=60)
+            if r.status_code != 200:
+                print(f"    ! Unsplash likes {r.status_code}"); continue
+            results = r.json()
+            if not isinstance(results, list) or not results:
+                continue
+            fresh = [p for p in results if p.get("id") not in used_ids] or results
+            photo = random.choice(fresh)
+            if photo.get("id"): used_ids.add(photo["id"])
+            urls = photo.get("urls", {})
+            img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
+            name = (photo.get("user") or {}).get("name", "-")
+            return requests.get(img_url, timeout=60).content, f"Foto: {name} (Unsplash, like kamu)"
+        except Exception as e:
+            print("    ! Unsplash likes gagal:", e)
+    return None, None
+
 def pexels_pick_collection(query, used_ids):
     """Ambil foto dari collection(s) Pexels milik user (acak, hindari yg udah kepake)."""
     ids = [c.strip() for c in PEXELS_COLLECTIONS.split(",") if c.strip()]
@@ -522,7 +548,14 @@ def image_pick(query, used_ids):
             if data:
                 return data, credit
         except Exception as e:
-            print("    ! sumber Unsplash pribadi gagal:", e)
+            print("    ! sumber Unsplash collection gagal:", e)
+    if UNSPLASH_LIKES_USER and UNSPLASH_ACCESS_KEY:
+        try:
+            data, credit = unsplash_pick_likes(used_ids)
+            if data:
+                return data, credit
+        except Exception as e:
+            print("    ! sumber Unsplash likes gagal:", e)
     if PEXELS_COLLECTIONS:
         try:
             data, credit = pexels_pick_collection(query, used_ids)
@@ -530,8 +563,8 @@ def image_pick(query, used_ids):
                 return data, credit
         except Exception as e:
             print("    ! sumber Pexels pribadi gagal:", e)
-    # kalau user mau HANYA foto simpenan & memang sudah set collection -> stop (jangan ke internet umum)
-    if PERSONAL_IMAGES_ONLY and (UNSPLASH_COLLECTIONS or PEXELS_COLLECTIONS):
+    # kalau user mau HANYA foto simpenan & memang sudah set sumber pribadi -> stop (jangan ke internet umum)
+    if PERSONAL_IMAGES_ONLY and (UNSPLASH_COLLECTIONS or UNSPLASH_LIKES_USER or PEXELS_COLLECTIONS):
         return None, None
     # 2) CADANGAN: cari di internet umum (perilaku lama)
     sources = (["unsplash", "pexels"] if UNSPLASH_ACCESS_KEY else ["pexels"])
