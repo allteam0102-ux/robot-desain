@@ -611,7 +611,7 @@ def smart_crop_canvas(im, context=""):
                 bx1 = min(W, (x + w + pad) * W); by1 = min(H, (y + h + pad) * H)
                 if bx1 - bx0 >= 8 and by1 - by0 >= 8:
                     print(f"    [smart-crop] fokus box={tuple(round(v, 2) for v in box)}")
-                    return _box_crop_to_aspect(im, (bx0, by0, bx1, by1), CANVAS_W / CANVAS_H)
+                    return _box_crop_to_aspect(im, (bx0, by0, bx1, by1), CANVAS_W / CANVAS_H), True
         except Exception as e:
             print("    ! smart-crop gagal, pakai crop tengah:", e)
         finally:
@@ -619,7 +619,7 @@ def smart_crop_canvas(im, context=""):
                 if tmp and os.path.exists(tmp): os.remove(tmp)
             except Exception:
                 pass
-    return crop_canvas(im)
+    return crop_canvas(im), False
 
 def film_grade(im):
     """Sentuhan film halus: saturasi sedikit turun, kontras tipis, hangat tipis."""
@@ -2152,6 +2152,7 @@ def process_page(page, workdir, mem=None, revision=None):
 
     slides_data, preview_paths, credits = [], [], []
     vision_notes = []           # catatan cek mandiri (AI vision)
+    smart_crop_slides = []      # slide mana yg berhasil di-auto-crop (buat lapor ke Telegram)
     used_ids = set()
     total = len(slide_blocks)
 
@@ -2204,7 +2205,8 @@ def process_page(page, workdir, mem=None, revision=None):
             if cdata is not None:
                 try:
                     cim = Image.open(io.BytesIO(cdata)).convert("RGB")
-                    base = smart_crop_canvas(cim, (headline + " " + body))  # gambar sendiri: JANGAN di-film-grade (biar doodle tetap bersih)
+                    base, _sc = smart_crop_canvas(cim, (headline + " " + body))  # gambar sendiri: JANGAN di-film-grade (biar doodle tetap bersih)
+                    if _sc: smart_crop_slides.append(i)
                     theme = pick_theme(base, forced_theme)
                     is_custom = True
                     credits.append(f"Slide {i}: (gambar sendiri / custom, tema {theme})")
@@ -2239,7 +2241,9 @@ def process_page(page, workdir, mem=None, revision=None):
             else:
                 im = make_placeholder()
                 credits.append(f"Slide {i}: (background netral — gambar '{q}' tak ditemukan)")
-            graded = film_grade(smart_crop_canvas(im, (headline + " " + body)))
+            _cim, _sc = smart_crop_canvas(im, (headline + " " + body))
+            if _sc: smart_crop_slides.append(i)
+            graded = film_grade(_cim)
             # terapkan GAYA ke foto stok
             if eff_style == "duotone":
                 base = duotone_teal(graded); theme = "dark"
@@ -2319,6 +2323,10 @@ def process_page(page, workdir, mem=None, revision=None):
         if b:
             lines.append(f"  {b}")
     lines += ["", *credits]
+    if smart_crop_slides:
+        lines += ["", f"✂️ Auto-crop cerdas jalan di slide: {', '.join(map(str, sorted(set(smart_crop_slides))))}"]
+    else:
+        lines += ["", "✂️ Auto-crop cerdas: nggak jalan (AI gagal/kuota) — foto pakai crop tengah"]
     if VISION_CHECK_ENABLED:
         warn = [n for n in vision_notes if "⚠️" in n]
         if warn:
