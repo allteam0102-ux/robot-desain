@@ -239,18 +239,24 @@ def notion_set_status(page_id, status_value, note=None, icon_emoji=None):
         body = {"properties": dict(props)}
         if note:
             body["properties"]["Catatan"] = {"rich_text": [{"text": {"content": note[:1900]}}]}
-        if icon_emoji:
-            body["icon"] = {"type": "emoji", "emoji": icon_emoji}
         r = requests.patch(url, headers=NOTION_HEADERS, json=body, timeout=60)
         if r.status_code == 200:
-            return
+            break
         # kalau gagal (mis. kolom 'Catatan' nggak ada), ulangi tanpa catatan
-        body2 = {"properties": props}
-        if icon_emoji:
-            body2["icon"] = {"type": "emoji", "emoji": icon_emoji}
-        r2 = requests.patch(url, headers=NOTION_HEADERS, json=body2, timeout=60)
+        r2 = requests.patch(url, headers=NOTION_HEADERS, json={"properties": props}, timeout=60)
         if r2.status_code == 200:
-            return
+            break
+    # --- IKON halaman di-patch TERPISAH + di-log (biar nggak kebawa gagal sama kolom lain) ---
+    if icon_emoji:
+        try:
+            ri = requests.patch(url, headers=NOTION_HEADERS,
+                                json={"icon": {"type": "emoji", "emoji": icon_emoji}}, timeout=60)
+            if ri.status_code == 200:
+                print(f"    ikon halaman -> {icon_emoji}")
+            else:
+                print(f"    ! set ikon gagal {ri.status_code}: {ri.text[:200]}")
+        except Exception as e:
+            print("    ! set ikon error:", e)
 
 def _plain_text(rich_list):
     return "".join(part.get("plain_text", "") for part in (rich_list or []))
