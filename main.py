@@ -81,6 +81,7 @@ G_HEAD_SCALE = 1.0   # pengali ukuran judul
 G_BODY_SCALE = 1.0   # pengali ukuran body
 G_SCRIM      = 1.0   # pengali kegelapan overlay/masking
 G_SOFT       = 0.0   # tambahan "film/soft" (0 = normal, makin besar makin lembut)
+G_HEAD_BOLD  = True  # judul tebal (True) / tipis (False) -> bisa digeser lewat revisi "jangan bold"
 
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
@@ -897,6 +898,69 @@ def body_top(zone, cover):
     L = ZONE_LAYOUT[zone]
     return L["by"] if cover else (L["hy"] + 0.085)
 
+# ---------- AUTO-FIT: hitung ukuran & posisi teks biar NGGAK ketimpa & nggak keluar kanvas ----------
+def _est_lines(text, width_px, font_px, bold):
+    """Perkiraan jumlah baris setelah teks turun-baris di lebar frame (tanpa metrik font)."""
+    if not text or not text.strip():
+        return 0
+    char_factor = 0.63 if bold else 0.56
+    max_chars = max(6, int(width_px / max(1.0, font_px * char_factor)))
+    lines = 0
+    for para in text.split("\n"):
+        words = []
+        for seg in rich_segments(para):
+            for w in seg[0].split(" "):
+                if w != "":
+                    words.append(w)
+        if not words:
+            lines += 1
+            continue
+        cur_len, n = 0, 0
+        for w in words:
+            add = len(w) + (1 if n > 0 else 0)
+            if n > 0 and cur_len + add > max_chars:
+                lines += 1
+                cur_len, n = len(w), 1
+            else:
+                cur_len += add; n += 1
+        lines += 1
+    return lines
+
+def fit_text_layout(zone, cover, headline, body):
+    """Kembalikan ukuran font & posisi (fraksi tinggi) judul+body yang DIJAMIN:
+    - body selalu di BAWAH judul (nggak ketimpa)
+    - semua muat sebelum area footer/CTA (kalau kepanjangan, font otomatis diperkecil)."""
+    L = ZONE_LAYOUT.get(zone, ZONE_LAYOUT["bottom"])
+    W, H = CANVAS_W, CANVAS_H
+    hw_px = L["hw"] * W
+    bw_px = L["bw"] * W
+    hpx = head_px(zone, cover)
+    bpx = body_px(zone)
+    HEAD_LH, BODY_LH, GAP = 1.16, 1.34, 0.022
+    top0 = L["hy"]
+    body_min = L["by"] if cover else (L["hy"] + 0.085)
+    bottom = 0.90                      # batas bawah (di atas footer 0.925 / pill CTA 0.90)
+    for _ in range(24):
+        hl = _est_lines(headline, hw_px, hpx, True)
+        bl = _est_lines(body, bw_px, bpx, False)
+        hh = hl * hpx * HEAD_LH / H
+        bh = bl * bpx * BODY_LH / H
+        btop = max(body_min, top0 + hh + (GAP if hl else 0.0))
+        if btop + bh <= bottom:
+            break
+        if hpx > 24 and hh >= bh:
+            hpx = max(24, int(hpx * 0.94))
+        elif bpx > 16:
+            bpx = max(16, int(bpx * 0.95))
+        elif hpx > 18:
+            hpx = max(18, int(hpx * 0.94))
+        else:
+            break
+    hl = _est_lines(headline, hw_px, hpx, True)
+    hh = hl * hpx * HEAD_LH / H
+    btop = max(body_min, top0 + hh + (GAP if hl else 0.0))
+    return {"head_px": hpx, "body_px": bpx, "head_top": top0, "body_top": btop}
+
 
 def _interp(stops, t):
     """stops = [(frac, value), ...] menaik; interpolasi halus (smoothstep)."""
@@ -1215,13 +1279,16 @@ def build_pptx(slides_data, out_path, logo_path, logo_dark_path=None):
         al = _pp_align(L["align"])
         is_stabilo = (s.get("style") == "stabilo")
         head_color = STABILO_TXT if is_stabilo else body_txt
+        fit = fit_text_layout(zone, cover, s.get("headline", ""), s.get("body", ""))
+        h_ratio = fit["head_px"] / max(1, head_px(zone, cover))
+        b_ratio = fit["body_px"] / max(1, body_px(zone))
         if s["headline"]:
-            _add_text(slide, L["hx"], L["hy"], L["hw"], 0.18, s["headline"],
-                      head_pt(zone, cover), True, HEADLINE_FONT, head_color, align=al,
+            _add_text(slide, L["hx"], fit["head_top"], L["hw"], 0.30, s["headline"],
+                      max(8, int(round(head_pt(zone, cover) * h_ratio))), G_HEAD_BOLD, HEADLINE_FONT, head_color, align=al,
                       highlight=True, band=is_stabilo)
         if s["body"]:
-            _add_text(slide, L["bx"], body_top(zone, cover), L["bw"], 0.34, s["body"],
-                      body_pt(zone), False, BODY_FONT, body_txt, align=al, highlight=True)
+            _add_text(slide, L["bx"], fit["body_top"], L["bw"], 0.34, s["body"],
+                      max(7, int(round(body_pt(zone) * b_ratio))), False, BODY_FONT, body_txt, align=al, highlight=True)
         if FOOTER_TEXT:
             _add_text(slide, 0.06, 0.93, 0.58, 0.055, FOOTER_TEXT, 11, False, BODY_FONT, body_txt)
         if s["total"] > 1 and CTA_TEXT:
@@ -1435,13 +1502,14 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
         is_stabilo = (s.get("style") == "stabilo")
         head_color = STABILO_TXT if is_stabilo else body_txt
         head_band  = STABILO_COLOR if is_stabilo else None
+        fit = fit_text_layout(zone, cover, s.get("headline", ""), s.get("body", ""))
         if s["headline"]:
-            parts.append(_svg_text(s["headline"], hx, int(L["hy"] * H),
-                                   int(L["hw"] * CANVAS_W), head_px(zone, cover), True, HEADLINE_FONT,
+            parts.append(_svg_text(s["headline"], hx, int(fit["head_top"] * H),
+                                   int(L["hw"] * CANVAS_W), fit["head_px"], G_HEAD_BOLD, HEADLINE_FONT,
                                    anchor=anc, highlight=True, color=head_color, band=head_band))
         if s["body"]:
-            parts.append(_svg_text(s["body"], bx, int(body_top(zone, cover) * H),
-                                   int(L["bw"] * CANVAS_W), body_px(zone), False, BODY_FONT,
+            parts.append(_svg_text(s["body"], bx, int(fit["body_top"] * H),
+                                   int(L["bw"] * CANVAS_W), fit["body_px"], False, BODY_FONT,
                                    anchor=anc, highlight=True, color=body_txt))
         if FOOTER_TEXT:
             parts.append(_svg_text(FOOTER_TEXT, xo + int(0.06*CANVAS_W), int(0.925*H),
@@ -1564,19 +1632,21 @@ body{{background:#444;}}
         L = ZONE_LAYOUT.get(zone, ZONE_LAYOUT["bottom"])
         align = "center" if L["align"] == "center" else "left"
         is_stabilo = (s.get("style") == "stabilo")
+        fit = fit_text_layout(zone, cover, s.get("headline", ""), s.get("body", ""))
+        hweight = 700 if G_HEAD_BOLD else 400
         if s.get("headline"):
             hcolor = STABILO_TXT if is_stabilo else body_txt
             inner = _html_rich(s["headline"])
             if is_stabilo:
                 inner = f'<span class="stabilo">{inner}</span>'
             parts.append(
-                f'<div class="hl" style="left:{int(L["hx"]*W)}px;top:{int(L["hy"]*H)}px;'
-                f'width:{int(L["hw"]*W)}px;font-size:{head_px(zone,cover)}px;'
+                f'<div class="hl" style="left:{int(L["hx"]*W)}px;top:{int(fit["head_top"]*H)}px;'
+                f'width:{int(L["hw"]*W)}px;font-size:{fit["head_px"]}px;font-weight:{hweight};'
                 f'color:#{hcolor};text-align:{align}">{inner}</div>')
         if s.get("body"):
             parts.append(
-                f'<div class="bd" style="left:{int(L["bx"]*W)}px;top:{int(body_top(zone,cover)*H)}px;'
-                f'width:{int(L["bw"]*W)}px;font-size:{body_px(zone)}px;'
+                f'<div class="bd" style="left:{int(L["bx"]*W)}px;top:{int(fit["body_top"]*H)}px;'
+                f'width:{int(L["bw"]*W)}px;font-size:{fit["body_px"]}px;'
                 f'color:#{body_txt};text-align:{align}">{_html_rich(s["body"])}</div>')
         if FOOTER_TEXT:
             parts.append(f'<div class="footer" style="color:#{body_txt}">{html.escape(FOOTER_TEXT)}</div>')
@@ -1688,7 +1758,7 @@ def tg_download_file(file_path, out_path):
 # 7b. SISTEM BELAJAR — memori + feedback (approve/reject + alasan)
 # ======================================================================
 DEFAULT_MEMORY = {
-    "preferences": {"head_scale": 1.0, "body_scale": 1.0, "scrim": 1.0, "soft": 0.0},
+    "preferences": {"head_scale": 1.0, "body_scale": 1.0, "scrim": 1.0, "soft": 0.0, "head_bold": True},
     "pending": {},        # token -> {title, page_id, ts, revision}
     "resolved": [],       # token yang sudah dinilai (anti dobel)
     "awaiting_text": None,  # token yang menunggu alasan ketik
@@ -1755,7 +1825,7 @@ def apply_reason(prefs, code):
 def prefs_summary(prefs):
     return (f"Setelan belajar sekarang: judul {int(prefs['head_scale']*100)}%, "
             f"body {int(prefs['body_scale']*100)}%, overlay {int(prefs['scrim']*100)}%, "
-            f"soft +{int(prefs['soft']*100)}%.")
+            f"soft +{int(prefs['soft']*100)}%, judul {'tebal' if prefs.get('head_bold', True) else 'tipis'}.")
 
 
 # ---------- OTAK AI: Gemini (utama) + Groq (cadangan). Dua-duanya gratis ----------
@@ -1828,6 +1898,9 @@ Terjemahkan jadi penyesuaian angka. Setelan sekarang (1.0 = normal):
 - body_scale: ukuran teks BODY (batas 0.7-1.3)
 - scrim: kegelapan overlay di belakang teks (batas 0.6-1.6; naik = lebih gelap = teks lebih terbaca)
 - soft: kesan film/lembut pada gambar (batas 0.0-0.4; naik = lebih lembut/pudar; turun = lebih cerah/tajam)
+- head_bold: JUDUL tebal/bold (true) atau tipis/normal (false). Isi true/false HANYA kalau user
+  nyinggung ketebalan judul (mis. "judul jangan bold", "teksnya jangan tebal", "tipisin tulisannya"
+  -> false; "judul dibold", "tebelin judulnya" -> true). Kalau user nggak nyinggung bold -> null.
 PENTING: hampir SEMUA masukan user = permintaan revisi -> set action "revise".
 Keluhan/komentar sekecil apapun soal desain (foto/teks/warna/overlay) = "revise".
 Contoh yang HARUS "revise": "gambar kurang bagus", "kurang aesthetic", "ganti foto",
@@ -1843,7 +1916,7 @@ TAMBAHAN PENTING (revisi per-bagian):
 - "slides": daftar nomor slide yg disebut user (mis. "slide 3 ganti foto" -> [3];
   "slide 2 dan 4" -> [2,4]). Kalau user TIDAK sebut nomor slide -> [] (artinya berlaku semua slide).
 Balas HANYA JSON valid, tanpa teks lain:
-{"head_scale_delta": <angka -0.12..0.12>, "body_scale_delta": <angka>, "scrim_delta": <angka>, "soft_delta": <angka>, "new_photo": true/false, "slides": [<nomor>], "note": "<ringkasan singkat dalam bahasa Indonesia, maks 12 kata>", "action": "revise" atau "none"}
+{"head_scale_delta": <angka -0.12..0.12>, "body_scale_delta": <angka>, "scrim_delta": <angka>, "soft_delta": <angka>, "head_bold": true/false/null, "new_photo": true/false, "slides": [<nomor>], "note": "<ringkasan singkat dalam bahasa Indonesia, maks 12 kata>", "action": "revise" atau "none"}
 Pesan user: "%s" """
 
 def ai_parse_command(text):
@@ -1866,6 +1939,14 @@ def apply_ai(prefs, data):
         if abs(d) >= 0.01:
             prefs[knob] = _clamp(prefs[knob] + d, lo, hi)
             changed.append(knob)
+    # judul tebal/tipis (bukan angka, tapi on/off)
+    hb = data.get("head_bold", None)
+    if isinstance(hb, str):
+        hb = {"true": True, "false": False, "ya": True, "iya": True, "tidak": False,
+              "no": False, "yes": True, "1": True, "0": False}.get(hb.strip().lower(), None)
+    if isinstance(hb, bool) and bool(prefs.get("head_bold", True)) != hb:
+        prefs["head_bold"] = hb
+        changed.append("head_bold")
     return changed
 
 def apply_example(prefs, data):
@@ -2189,7 +2270,8 @@ def process_feedback(mem):
                 data = ai_parse_command(text)
                 # PENGAMAN: AI bilang "none" tapi teks jelas keluhan + ada desain nunggu -> tetap REVISI
                 _rev_kata = ("ganti", "ubah", "revisi", "perbaiki", "kurang", "jelek", "buram",
-                             "norak", "kegedean", "kekecilan", "lebih ", "jangan", "terlalu")
+                             "norak", "kegedean", "kekecilan", "lebih ", "jangan", "terlalu",
+                             "bold", "tebal", "tipis", "tebel", "numpuk", "tumpang", "ketimpa", "nabrak")
                 if (data and data.get("action") == "none"
                         and any(k in low for k in _rev_kata) and _latest_pending(mem)):
                     data["action"] = "revise"
@@ -2301,12 +2383,13 @@ def process_feedback(mem):
     return mem
 
 def apply_prefs_to_globals(mem):
-    global G_HEAD_SCALE, G_BODY_SCALE, G_SCRIM, G_SOFT
+    global G_HEAD_SCALE, G_BODY_SCALE, G_SCRIM, G_SOFT, G_HEAD_BOLD
     p = mem.get("preferences", {})
     G_HEAD_SCALE = float(p.get("head_scale", 1.0))
     G_BODY_SCALE = float(p.get("body_scale", 1.0))
     G_SCRIM      = float(p.get("scrim", 1.0))
     G_SOFT       = float(p.get("soft", 0.0))
+    G_HEAD_BOLD  = bool(p.get("head_bold", True))
 
 
 # ======================================================================
