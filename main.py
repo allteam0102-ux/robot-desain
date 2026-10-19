@@ -1923,6 +1923,85 @@ def ai_parse_command(text):
     """Ubah kalimat bebas jadi penyesuaian angka (Gemini/Groq). None kalau gagal/mati."""
     return ai_json(AI_PROMPT % text[:400])
 
+def local_parse_command(text):
+    """Penerjemah revisi LOKAL (tanpa AI) berbasis kata kunci.
+    Dipakai sebagai cadangan biar revisi KETIK tetap ngefek walau AI mati/kuota penuh.
+    Bentuk hasil = sama kaya output AI (delta + head_bold + new_photo + slides + action)."""
+    low = (text or "").lower()
+    def has(*kw): return any(k in low for k in kw)
+    d = {"head_scale_delta": 0.0, "body_scale_delta": 0.0, "scrim_delta": 0.0,
+         "soft_delta": 0.0, "head_bold": None, "new_photo": False,
+         "slides": _slide_nums_in(text), "note": "", "action": "none"}
+    notes = []
+    # sasaran: apakah nyebut "judul" atau "body/isi" spesifik? kalau "teks" aja -> dua-duanya
+    hit_judul = has("judul", "headline", "tulisan besar", "title")
+    hit_body  = has("body", "isi", "caption", "deskripsi", "paragraf", "teks kecil")
+    both = (not hit_judul and not hit_body)   # "teks" umum -> kena dua-duanya
+
+    # --- UKURAN ---
+    if has("kegedean", "kegede", "kebesaran", "gede banget", "kebesaren", "terlalu besar", "terlalu gede", "kecilin", "perkecil", "kecilkan"):
+        if hit_judul or both: d["head_scale_delta"] -= 0.12
+        if hit_body  or both: d["body_scale_delta"] -= 0.10
+        notes.append("teks dikecilin")
+    if has("kekecilan", "kekecilen", "kecil banget", "terlalu kecil", "gedein", "perbesar", "besarin", "gedekan", "lebih besar", "lebih gede"):
+        if hit_judul or both: d["head_scale_delta"] += 0.12
+        if hit_body  or both: d["body_scale_delta"] += 0.10
+        notes.append("teks digedein")
+
+    # --- OVERLAY / KETERBACAAN ---
+    if has("susah kebaca", "susah dibaca", "ga kebaca", "nggak kebaca", "gak kebaca", "kurang jelas", "nggak jelas", "ga jelas", "overlay kurang gelap", "kurang gelap", "lebih gelap", "pergelap", "pertegas"):
+        d["scrim_delta"] += 0.15; notes.append("overlay dipergelap")
+    if has("overlay kegelapan", "kegelapan", "terlalu gelap", "kegelapen", "overlay tebal", "overlay kurangin", "kurangi overlay", "overlay tipisin", "gelap banget"):
+        d["scrim_delta"] -= 0.15; notes.append("overlay dipertipis")
+
+    # --- SOFT / CERAH ---
+    if has("lebih soft", "lebih lembut", "lebih film", "lebih pudar", "soft", "lembutin", "pudarin", "vintage"):
+        d["soft_delta"] += 0.10; notes.append("foto dibikin lembut")
+    if has("lebih cerah", "lebih terang", "lebih tajam", "cerahin", "terangin", "tajamin", "jangan pudar", "jangan soft"):
+        d["soft_delta"] -= 0.10; notes.append("foto dibikin cerah")
+
+    # --- BOLD JUDUL ---
+    if has("jangan bold", "ga bold", "gak bold", "nggak bold", "tanpa bold", "jangan tebal", "jangan tebel", "ga tebal", "nggak tebal", "tipisin", "tipis", "jangan ada yang bold", "nggak ada yang bold", "ga ada yang bold"):
+        d["head_bold"] = False; notes.append("judul dibikin tipis")
+    elif has("dibold", "di bold", "pakai bold", "tebelin", "tebalin", "dipertebal", "pertebal", "judul tebal", "judul bold", "bold lagi", "tebal lagi"):
+        d["head_bold"] = True; notes.append("judul dibikin tebal")
+
+    # --- GANTI FOTO ---
+    if has("ganti foto", "ganti gambar", "foto baru", "gambar baru", "foto jelek", "gambar jelek",
+           "foto kurang", "gambar kurang", "foto nggak", "gambar nggak", "foto ga", "gambar ga",
+           "aesthetic", "estetik", "foto lain", "gambar lain", "fotonya jelek", "gambarnya jelek"):
+        d["new_photo"] = True; notes.append("foto diganti baru")
+
+    _rev_kata = ("ganti", "ubah", "revisi", "perbaiki", "kurang", "jelek", "buram", "norak",
+                 "kegedean", "kekecilan", "lebih ", "jangan", "terlalu", "bold", "tebal",
+                 "tipis", "tebel", "numpuk", "tumpang", "ketimpa", "nabrak", "pindah", "geser")
+    any_change = (abs(d["head_scale_delta"]) + abs(d["body_scale_delta"]) + abs(d["scrim_delta"])
+                  + abs(d["soft_delta"]) >= 0.01) or (d["head_bold"] is not None) or d["new_photo"]
+    if any_change or has(*_rev_kata):
+        d["action"] = "revise"
+    d["note"] = (", ".join(notes) or (text or "")[:60])
+    return d
+
+def _merge_cmd(ai_data, local):
+    """Gabung hasil AI + lokal. Lokal MENAMBAL yg AI lewatin, biar ketikan selalu ngefek."""
+    if not ai_data:
+        return local
+    for k in ("head_scale_delta", "body_scale_delta", "scrim_delta", "soft_delta"):
+        try:
+            if abs(float(ai_data.get(k, 0) or 0)) < 0.01 and abs(float(local.get(k, 0) or 0)) >= 0.01:
+                ai_data[k] = local[k]
+        except Exception:
+            pass
+    if ai_data.get("head_bold", None) is None and local.get("head_bold", None) is not None:
+        ai_data["head_bold"] = local["head_bold"]
+    if not ai_data.get("new_photo") and local.get("new_photo"):
+        ai_data["new_photo"] = True
+    if not ai_data.get("slides") and local.get("slides"):
+        ai_data["slides"] = local["slides"]
+    if local.get("action") == "revise" and ai_data.get("action") != "revise":
+        ai_data["action"] = "revise"
+    return ai_data
+
 def apply_ai(prefs, data):
     """Terapkan delta dari AI (dibatasi aman). Kembalikan daftar yg berubah."""
     changed = []
@@ -1937,8 +2016,10 @@ def apply_ai(prefs, data):
             d = 0.0
         d = _clamp(d, -0.15, 0.15)   # batasi per-perintah biar nggak loncat jauh
         if abs(d) >= 0.01:
-            prefs[knob] = _clamp(prefs[knob] + d, lo, hi)
-            changed.append(knob)
+            new = _clamp(prefs[knob] + d, lo, hi)
+            if abs(new - float(prefs[knob])) >= 1e-6:   # cuma catat kalau beneran berubah (nggak mentok limit)
+                prefs[knob] = new
+                changed.append(knob)
     # judul tebal/tipis (bukan angka, tapi on/off)
     hb = data.get("head_bold", None)
     if isinstance(hb, str):
@@ -2267,7 +2348,10 @@ def process_feedback(mem):
                 continue
             # ---- CHAT AI: perintah revisi bebas (ketik kalimat biasa) ----
             if text:
-                data = ai_parse_command(text)
+                # Penerjemah LOKAL (tanpa AI) dulu -> ketikan SELALU ngefek walau AI mati.
+                local_cmd = local_parse_command(text)
+                data = ai_parse_command(text)        # AI (kalau nyala) buat nambah pinter
+                data = _merge_cmd(data, local_cmd)   # gabung: lokal nambal yg AI lewatin
                 # PENGAMAN: AI bilang "none" tapi teks jelas keluhan + ada desain nunggu -> tetap REVISI
                 _rev_kata = ("ganti", "ubah", "revisi", "perbaiki", "kurang", "jelek", "buram",
                              "norak", "kegedean", "kekecilan", "lebih ", "jangan", "terlalu",
