@@ -65,6 +65,8 @@ FILM_GRADE    = (os.environ.get("FILM_GRADE") or "true").lower() == "true"
 PHOTO_SATURATION = float(os.environ.get("PHOTO_SATURATION") or 1.10)
 PHOTO_BRIGHTNESS = float(os.environ.get("PHOTO_BRIGHTNESS") or 1.03)
 PHOTO_CONTRAST   = float(os.environ.get("PHOTO_CONTRAST") or 1.03)
+# Foto yg udah kepakai nggak boleh dipakai lagi sampai lewat sekian hari (default 6 bulan).
+PHOTO_COOLDOWN_DAYS = int(os.environ.get("PHOTO_COOLDOWN_DAYS") or 180)
 
 CANVAS_W = int(os.environ.get("CANVAS_W") or 1080)
 CANVAS_H = int(os.environ.get("CANVAS_H") or 1350)
@@ -424,11 +426,11 @@ def pexels_pick(query, used_ids):
     photos = _search(_short_q(query)) or _search(_short_q(query, add_hint=False)) or _search("aesthetic minimal portrait")
     if not photos:
         return None, None
-    fresh = [p for p in photos if p.get("id") not in used_ids]
+    fresh = [p for p in photos if str(p.get("id")) not in used_ids]
     pool = fresh if fresh else photos
     photo = random.choice(pool[:8])
     if photo.get("id"):
-        used_ids.add(photo["id"])
+        used_ids.add(str(photo["id"]))
     img_url = photo["src"].get("large2x") or photo["src"].get("large") or photo["src"]["original"]
     return requests.get(img_url, timeout=60).content, f'Foto: {photo.get("photographer","-")} (Pexels)'
 
@@ -441,11 +443,11 @@ def unsplash_pick(query, used_ids):
     results = r.json().get("results", [])
     if not results:
         return None, None
-    fresh = [p for p in results if p.get("id") not in used_ids]
+    fresh = [p for p in results if str(p.get("id")) not in used_ids]
     pool = fresh if fresh else results
     photo = random.choice(pool[:8])
     if photo.get("id"):
-        used_ids.add(photo["id"])
+        used_ids.add(str(photo["id"]))
     urls = photo.get("urls", {})
     img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
     name = (photo.get("user") or {}).get("name", "-")
@@ -465,9 +467,9 @@ def _unsplash_collection_random(used_ids):
             results = r.json()
             if not isinstance(results, list) or not results:
                 continue
-            fresh = [p for p in results if p.get("id") not in used_ids] or results
+            fresh = [p for p in results if str(p.get("id")) not in used_ids] or results
             photo = random.choice(fresh)
-            if photo.get("id"): used_ids.add(photo["id"])
+            if photo.get("id"): used_ids.add(str(photo["id"]))
             urls = photo.get("urls", {})
             img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
             name = (photo.get("user") or {}).get("name", "-")
@@ -486,10 +488,10 @@ def unsplash_pick_collection(query, used_ids):
                                  "collections": UNSPLASH_COLLECTIONS}, timeout=60)
         if r.status_code == 200:
             results = r.json().get("results", [])
-            fresh = [p for p in results if p.get("id") not in used_ids] or results
+            fresh = [p for p in results if str(p.get("id")) not in used_ids] or results
             if fresh:
                 photo = random.choice(fresh[:8])
-                if photo.get("id"): used_ids.add(photo["id"])
+                if photo.get("id"): used_ids.add(str(photo["id"]))
                 urls = photo.get("urls", {})
                 img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
                 name = (photo.get("user") or {}).get("name", "-")
@@ -514,9 +516,9 @@ def unsplash_pick_likes(used_ids):
             results = r.json()
             if not isinstance(results, list) or not results:
                 continue
-            fresh = [p for p in results if p.get("id") not in used_ids] or results
+            fresh = [p for p in results if str(p.get("id")) not in used_ids] or results
             photo = random.choice(fresh)
-            if photo.get("id"): used_ids.add(photo["id"])
+            if photo.get("id"): used_ids.add(str(photo["id"]))
             urls = photo.get("urls", {})
             img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
             name = (photo.get("user") or {}).get("name", "-")
@@ -539,9 +541,9 @@ def pexels_pick_collection(query, used_ids):
             media = [m for m in r.json().get("media", []) if (m.get("type") or "").lower() == "photo"]
             if not media:
                 continue
-            fresh = [m for m in media if m.get("id") not in used_ids] or media
+            fresh = [m for m in media if str(m.get("id")) not in used_ids] or media
             photo = random.choice(fresh)
-            if photo.get("id"): used_ids.add(photo["id"])
+            if photo.get("id"): used_ids.add(str(photo["id"]))
             src = photo.get("src", {})
             img_url = src.get("large2x") or src.get("large") or src.get("original")
             if not img_url:
@@ -550,6 +552,35 @@ def pexels_pick_collection(query, used_ids):
         except Exception as e:
             print(f"    ! Pexels collection {cid} gagal:", e)
     return None, None
+
+# ---------- RIWAYAT FOTO: biar foto yg udah kepakai nggak muncul lagi < 6 bulan ----------
+def photo_block_set(mem):
+    """Kumpulan id foto (str) yg masih 'cooldown' (dipakai < PHOTO_COOLDOWN_DAYS lalu).
+    Sekalian prune entri yg udah lewat 6 bulan (boleh dipakai lagi)."""
+    hist = mem.get("photo_history") or {}
+    now = int(time.time())
+    cutoff = PHOTO_COOLDOWN_DAYS * 86400
+    block, keep = set(), {}
+    for pid, ts in hist.items():
+        try:
+            ts = int(ts)
+        except Exception:
+            continue
+        if now - ts < cutoff:
+            block.add(str(pid)); keep[str(pid)] = ts
+        # yg udah lewat cutoff: dibuang dari catatan (boleh dipakai lagi)
+    mem["photo_history"] = keep
+    return block
+
+def record_photos_used(mem, ids):
+    """Catat id foto (str) yg baru kepakai + timestamp sekarang."""
+    if not ids:
+        return
+    hist = mem.setdefault("photo_history", {})
+    now = int(time.time())
+    for pid in ids:
+        if pid:
+            hist[str(pid)] = now
 
 def image_pick(query, used_ids):
     # 1) SUMBER PRIBADI dulu: collection akun user (kalau diisi)
@@ -1788,6 +1819,7 @@ DEFAULT_MEMORY = {
     "awaiting_text": None,  # token yang menunggu alasan ketik
     "revise_queue": {},   # page_id -> {title, revision, reasons[], new_photo, slides[]} konten yg minta direvisi
     "design_cache": {},   # page_id -> {hash, n, title, slides:{i:{theme,style}}} utk revisi pakai-ulang gambar
+    "photo_history": {},  # id_foto (str) -> unix_ts terakhir dipakai (biar nggak dipakai lagi < 6 bulan)
     "log": [],            # riwayat {ts, title, status, reason}
     "stats": {"approved": 0, "rejected": 0, "weekly": []},
     "tg_offset": 0,
@@ -2554,7 +2586,8 @@ def process_page(page, workdir, mem=None, revision=None):
     slides_data, preview_paths, credits = [], [], []
     vision_notes = []           # catatan cek mandiri (AI vision)
     smart_crop_slides = []      # slide mana yg berhasil di-auto-crop (buat lapor ke Telegram)
-    used_ids = set()
+    # mulai dari daftar foto yg masih 'cooldown' (dipakai < 6 bln) -> otomatis dihindari
+    used_ids = set(photo_block_set(mem)) if mem is not None else set()
     total = len(slide_blocks)
 
     # fitur "bawa gambar sendiri": daftar gambar tempelan Notion diambil sekali (lazy),
@@ -2634,8 +2667,12 @@ def process_page(page, workdir, mem=None, revision=None):
                 q = ai_kws[i - 1].strip()
             else:
                 q = keyword_for(i - 1, keyword_blocks, headline, body)
+            _before = set(used_ids)
             data, credit = image_pick(q, used_ids)
             if data:
+                # catat foto yg baru kepakai ke riwayat (anti-pakai-ulang < 6 bulan)
+                if mem is not None:
+                    record_photos_used(mem, used_ids - _before)
                 im = Image.open(io.BytesIO(data)).convert("RGB")
                 if credit:
                     credits.append(f"Slide {i}: {credit}")
