@@ -61,6 +61,10 @@ CTA_HANDLE    = os.environ.get("CTA_HANDLE")    or "@nikahinstitute"
 # gaya gambar: dibiaskan ke aesthetic/editorial luar negeri, premium, bukan norak
 STYLE_HINT    = os.environ.get("STYLE_HINT")    or "editorial lifestyle film"
 FILM_GRADE    = (os.environ.get("FILM_GRADE") or "true").lower() == "true"
+# Warna foto stok: >1.0 = lebih nyala/vivid, <1.0 = lebih kusam. Default dibikin natural-nyala.
+PHOTO_SATURATION = float(os.environ.get("PHOTO_SATURATION") or 1.10)
+PHOTO_BRIGHTNESS = float(os.environ.get("PHOTO_BRIGHTNESS") or 1.03)
+PHOTO_CONTRAST   = float(os.environ.get("PHOTO_CONTRAST") or 1.03)
 
 CANVAS_W = int(os.environ.get("CANVAS_W") or 1080)
 CANVAS_H = int(os.environ.get("CANVAS_H") or 1350)
@@ -832,16 +836,18 @@ def smart_crop_canvas(im, context=""):
     return crop_canvas(im), None
 
 def film_grade(im):
-    """Sentuhan film halus: saturasi sedikit turun, kontras tipis, hangat tipis."""
+    """Sentuhan film halus: warna natural-nyala (nggak kusam), kontras tipis, hangat tipis.
+    G_SOFT (dari revisi 'lebih soft') tetap bisa nurunin saturasi kalau user minta."""
     if not FILM_GRADE:
         return im
     try:
-        im = ImageEnhance.Color(im).enhance(_clamp(0.90 - G_SOFT, 0.45, 1.0))  # knob: makin soft makin turun saturasi
-        im = ImageEnhance.Contrast(im).enhance(1.04)
-        im = ImageEnhance.Brightness(im).enhance(1.01)
+        # saturasi: default nyala (PHOTO_SATURATION); 'lebih soft' nurunin, 'lebih cerah' naikin
+        im = ImageEnhance.Color(im).enhance(_clamp(PHOTO_SATURATION - G_SOFT * 1.3, 0.5, 1.35))
+        im = ImageEnhance.Contrast(im).enhance(PHOTO_CONTRAST)
+        im = ImageEnhance.Brightness(im).enhance(PHOTO_BRIGHTNESS)
         r, g, b = im.split()
-        r = r.point(lambda v: min(255, int(v * 1.02)))
-        b = b.point(lambda v: int(v * 0.985))
+        r = r.point(lambda v: min(255, int(v * 1.015)))   # hangat tipis
+        b = b.point(lambda v: int(v * 0.99))
         im = Image.merge("RGB", (r, g, b))
     except Exception:
         pass
@@ -1897,7 +1903,7 @@ Terjemahkan jadi penyesuaian angka. Setelan sekarang (1.0 = normal):
 - head_scale: ukuran JUDUL (batas 0.7-1.3)
 - body_scale: ukuran teks BODY (batas 0.7-1.3)
 - scrim: kegelapan overlay di belakang teks (batas 0.6-1.6; naik = lebih gelap = teks lebih terbaca)
-- soft: kesan film/lembut pada gambar (batas 0.0-0.4; naik = lebih lembut/pudar; turun = lebih cerah/tajam)
+- soft: kesan film/lembut pada gambar (batas -0.3..0.4; naik = lebih lembut/pudar/kusam; turun/negatif = lebih cerah/nyala/tajam)
 - head_bold: JUDUL tebal/bold (true) atau tipis/normal (false). Isi true/false HANYA kalau user
   nyinggung ketebalan judul (mis. "judul jangan bold", "teksnya jangan tebal", "tipisin tulisannya"
   -> false; "judul dibold", "tebelin judulnya" -> true). Kalau user nggak nyinggung bold -> null.
@@ -1957,8 +1963,9 @@ def local_parse_command(text):
     # --- SOFT / CERAH ---
     if has("lebih soft", "lebih lembut", "lebih film", "lebih pudar", "soft", "lembutin", "pudarin", "vintage"):
         d["soft_delta"] += 0.10; notes.append("foto dibikin lembut")
-    if has("lebih cerah", "lebih terang", "lebih tajam", "cerahin", "terangin", "tajamin", "jangan pudar", "jangan soft"):
-        d["soft_delta"] -= 0.10; notes.append("foto dibikin cerah")
+    if has("lebih cerah", "lebih terang", "lebih tajam", "cerahin", "terangin", "tajamin", "jangan pudar",
+           "jangan soft", "kusam", "vivid", "nyala", "pucat", "warnanya kurang", "warna kurang", "jangan kusam"):
+        d["soft_delta"] -= 0.12; notes.append("foto dibikin lebih nyala/cerah")
 
     # --- BOLD JUDUL ---
     if has("jangan bold", "ga bold", "gak bold", "nggak bold", "tanpa bold", "jangan tebal", "jangan tebel", "ga tebal", "nggak tebal", "tipisin", "tipis", "jangan ada yang bold", "nggak ada yang bold", "ga ada yang bold"):
@@ -2008,7 +2015,7 @@ def apply_ai(prefs, data):
     plan = [("head_scale_delta", "head_scale", 0.7, 1.3),
             ("body_scale_delta", "body_scale", 0.7, 1.3),
             ("scrim_delta", "scrim", 0.6, 1.6),
-            ("soft_delta", "soft", 0.0, 0.4)]
+            ("soft_delta", "soft", -0.3, 0.4)]   # negatif = lebih cerah/nyala dari baseline
     for key, knob, lo, hi in plan:
         try:
             d = float(data.get(key, 0) or 0)
@@ -2034,7 +2041,7 @@ def apply_example(prefs, data):
     """Terapkan setelan HASIL BACA foto contoh (nilai ABSOLUT, bukan delta)."""
     changed = []
     plan = [("head_scale", 0.7, 1.3), ("body_scale", 0.7, 1.3),
-            ("scrim", 0.6, 1.6), ("soft", 0.0, 0.4)]
+            ("scrim", 0.6, 1.6), ("soft", -0.3, 0.4)]
     for knob, lo, hi in plan:
         v = (data or {}).get(knob)
         if v is None:
