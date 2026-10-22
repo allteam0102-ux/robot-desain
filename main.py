@@ -893,6 +893,30 @@ ZONE_LAYOUT = {
     "center": dict(hx=0.10, hy=0.37, hw=0.80, bx=0.10, by=0.57, bw=0.80, align="center"),
     "card":   dict(hx=0.07, hy=0.615, hw=0.86, bx=0.07, by=0.74, bw=0.86, align="left"),
 }
+
+# ---------- GRADASI OVERLAY: dibikin MULUS (banyak titik, kurva eased) ----------
+# Satu sumber dipakai bareng oleh PNG (bake_scrim), SVG, dan HTML biar seragam & halus.
+# Tiap titik = (posisi 0..1, kegelapan 0..1). Transisinya bertahap -> nggak ada garis patahan.
+SCRIM_STOPS = {
+    "bottom": [(0.0,0.0),(0.22,0.015),(0.38,0.05),(0.50,0.13),(0.60,0.25),(0.70,0.41),
+               (0.80,0.59),(0.90,0.77),(1.0,0.90)],
+    "top":    [(0.0,0.82),(0.10,0.70),(0.20,0.52),(0.30,0.34),(0.42,0.17),(0.55,0.06),
+               (0.70,0.0),(1.0,0.0)],
+    "left":   [(0.0,0.82),(0.12,0.64),(0.25,0.44),(0.40,0.22),(0.55,0.07),(0.70,0.0),(1.0,0.0)],
+    "right":  [(0.0,0.0),(0.30,0.0),(0.45,0.07),(0.60,0.22),(0.75,0.44),(0.88,0.64),(1.0,0.82)],
+    "center": [(0.0,0.58),(0.35,0.42),(0.60,0.22),(0.80,0.09),(1.0,0.0)],
+}
+SCRIM_STRIP_TOP = [(0.0,0.45),(0.35,0.18),(0.65,0.05),(1.0,0.0)]   # strip logo/tagline atas (eased)
+SCRIM_STRIP_BOT = [(0.0,0.0),(0.45,0.06),(0.75,0.22),(1.0,0.55)]   # strip footer/tombol bawah (eased)
+
+def _scrim_scaled(stops):
+    """Kalikan kegelapan dgn knob G_SCRIM (revisi 'overlay lebih gelap/terang'), tetap 0..1."""
+    g = G_SCRIM
+    return [(o, _clamp(op * g, 0.0, 1.0)) for o, op in stops]
+
+def _css_stops(stops):
+    return ", ".join(f"rgba(0,0,0,{op:.3f}) {o*100:.1f}%" for o, op in stops)
+
 # Slide 1 (cover) judulnya besar; slide lain judul kecil (sesuai permintaan)
 # Ukuran dikali "knob" dari sistem belajar (G_HEAD_SCALE / G_BODY_SCALE).
 def head_pt(zone, cover):  return max(10, int(round((40 if cover else 23) * G_HEAD_SCALE)))
@@ -1002,32 +1026,29 @@ def bake_scrim(im, zone, out_path):
     """
     W, H = CANVAS_W, CANVAS_H
 
+    def _px(stops): return [(o, int(round(op * 255))) for o, op in stops]
+
     # feather vertikal buat zona samping: habis mulus di tepi atas & bawah
     vfeather = _mask_v([(0.0, 0), (0.17, 255), (0.83, 255), (1.0, 0)])
 
-    if zone == "top":
-        mask = _mask_v([(0.0, 210), (0.30, 170), (0.55, 0), (1.0, 0)])
-    elif zone == "bottom":
-        mask = _mask_v([(0.0, 0), (0.42, 0), (0.70, 170), (1.0, 225)])
-    elif zone == "left":
-        mask = ImageChops.multiply(_mask_h([(0.0, 210), (0.30, 150), (0.60, 0), (1.0, 0)]), vfeather)
-    elif zone == "right":
-        mask = ImageChops.multiply(_mask_h([(0.0, 0), (0.40, 0), (0.70, 150), (1.0, 210)]), vfeather)
-    else:  # center
-        mask = _mask_v([(0.0, 40), (0.30, 150), (0.70, 150), (1.0, 40)])
+    st = SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"])
+    if zone in ("left", "right"):
+        mask = ImageChops.multiply(_mask_h(_px(st)), vfeather)
+    else:  # top / bottom / center -> gradasi vertikal mulus
+        mask = _mask_v(_px(st))
 
     # strip tipis atas (logo & tagline) + bawah (footer & tombol) SELALU ada,
-    # tapi juga mulus (smoothstep) -> digabung pakai 'lighter' (ambil yang tergelap)
-    top_strip = _mask_v([(0.0, 120), (0.16, 0), (1.0, 0)])
-    bot_strip = _mask_v([(0.0, 0), (0.86, 0), (1.0, 150)])
+    # tapi juga mulus (eased) -> digabung pakai 'lighter' (ambil yang tergelap)
+    top_strip = _mask_v(_px([(o * 0.16, op) for o, op in SCRIM_STRIP_TOP] + [(1.0, 0.0)]))
+    bot_strip = _mask_v(_px([(0.0, 0.0)] + [(0.86 + o * 0.14, op) for o, op in SCRIM_STRIP_BOT]))
     mask = ImageChops.lighter(ImageChops.lighter(mask, top_strip), bot_strip)
 
     # knob kegelapan overlay (dari sistem belajar)
     if G_SCRIM != 1.0:
         mask = mask.point(lambda v: int(_clamp(v * G_SCRIM, 0, 255)))
 
-    # blur tipis -> hilangkan banding/garis
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(10, W // 54)))
+    # blur tipis -> perhalus lagi, hilangkan sisa banding
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(14, W // 42)))
 
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 255))
     overlay.putalpha(mask)
@@ -1412,21 +1433,18 @@ def _scrim_svg(zone, xo, idx):
     W, H = CANVAS_W, CANVAS_H
     gid = f"sc{idx}"
     defs, rects = [], []
-    # gradasi utama sesuai zona
-    if zone == "top":
-        defs.append(_grad_lin(gid, True, [(0, 0.80), (0.55, 0), (1, 0)]))
-    elif zone == "left":
-        defs.append(_grad_lin(gid, False, [(0, 0.80), (0.60, 0), (1, 0)]))
-    elif zone == "right":
-        defs.append(_grad_lin(gid, False, [(0, 0), (0.40, 0), (1, 0.80)]))
-    elif zone == "center":
-        defs.append(_grad_rad(gid, 0.5, [(0, 0.60), (1, 0.06)]))
-    else:  # bottom
-        defs.append(_grad_lin(gid, True, [(0, 0), (0.42, 0), (1, 0.88)]))
+    # gradasi utama sesuai zona (mulus/eased, dikali knob G_SCRIM)
+    st = _scrim_scaled(SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"]))
+    if zone == "center":
+        defs.append(_grad_rad(gid, 0.5, st))
+    elif zone in ("left", "right"):
+        defs.append(_grad_lin(gid, False, st))
+    else:  # top / bottom
+        defs.append(_grad_lin(gid, True, st))
     rects.append(f'<rect x="{xo}" y="0" width="{W}" height="{H}" fill="url(#{gid})"/>')
     # strip tipis atas (logo/tagline) & bawah (footer/tombol) — tetap editable
-    defs.append(_grad_lin(gid + "t", True, [(0, 0.45), (1, 0)]))
-    defs.append(_grad_lin(gid + "b", True, [(0, 0), (1, 0.55)]))
+    defs.append(_grad_lin(gid + "t", True, SCRIM_STRIP_TOP))
+    defs.append(_grad_lin(gid + "b", True, SCRIM_STRIP_BOT))
     rects.append(f'<rect x="{xo}" y="0" width="{W}" height="{int(0.16*H)}" fill="url(#{gid}t)"/>')
     rects.append(f'<rect x="{xo}" y="{int(0.86*H)}" width="{W}" height="{int(0.14*H)}" fill="url(#{gid}b)"/>')
     return "\n".join(defs), "\n".join(rects)
@@ -1560,17 +1578,17 @@ def _html_scrim(zone):
     """Overlay gelap (masking) sebagai div CSS TERPISAH dari foto -> editable sendiri di Figma.
     Gradasi disamain sama versi SVG per-zona + strip atas (logo/tagline) & bawah (footer/CTA)."""
     H = CANVAS_H
-    main = {
-        "top":    "linear-gradient(to bottom, rgba(0,0,0,.80) 0%, rgba(0,0,0,0) 55%, rgba(0,0,0,0) 100%)",
-        "left":   "linear-gradient(to right, rgba(0,0,0,.80) 0%, rgba(0,0,0,0) 60%, rgba(0,0,0,0) 100%)",
-        "right":  "linear-gradient(to right, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 40%, rgba(0,0,0,.80) 100%)",
-        "center": "radial-gradient(ellipse 80% 80% at 50% 50%, rgba(0,0,0,.60) 0%, rgba(0,0,0,.06) 100%)",
-        "bottom": "linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 42%, rgba(0,0,0,.88) 100%)",
-    }.get(zone, "linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 42%, rgba(0,0,0,.88) 100%)")
+    st = _scrim_scaled(SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"]))
+    if zone == "center":
+        main = f"radial-gradient(ellipse 80% 80% at 50% 50%, {_css_stops(st)})"
+    elif zone in ("left", "right"):
+        main = f"linear-gradient(to right, {_css_stops(st)})"
+    else:  # top / bottom
+        main = f"linear-gradient(to bottom, {_css_stops(st)})"
     return (
         f'<div class="ov" style="background:{main}"></div>'
-        f'<div class="ov" style="height:{int(0.16*H)}px;background:linear-gradient(to bottom, rgba(0,0,0,.45), rgba(0,0,0,0))"></div>'
-        f'<div class="ov" style="top:{int(0.86*H)}px;height:{int(0.14*H)}px;background:linear-gradient(to bottom, rgba(0,0,0,0), rgba(0,0,0,.55))"></div>'
+        f'<div class="ov" style="height:{int(0.16*H)}px;background:linear-gradient(to bottom, {_css_stops(SCRIM_STRIP_TOP)})"></div>'
+        f'<div class="ov" style="top:{int(0.86*H)}px;height:{int(0.14*H)}px;background:linear-gradient(to bottom, {_css_stops(SCRIM_STRIP_BOT)})"></div>'
     )
 
 def build_html(slides_data, out_path, logo_path, logo_dark_path=None):
