@@ -67,6 +67,8 @@ PHOTO_BRIGHTNESS = float(os.environ.get("PHOTO_BRIGHTNESS") or 1.03)
 PHOTO_CONTRAST   = float(os.environ.get("PHOTO_CONTRAST") or 1.03)
 # Foto yg udah kepakai nggak boleh dipakai lagi sampai lewat sekian hari (default 6 bulan).
 PHOTO_COOLDOWN_DAYS = int(os.environ.get("PHOTO_COOLDOWN_DAYS") or 180)
+# Ketebalan overlay gelap di belakang teks. 1.0 = pekat (lama), <1.0 = lebih tipis (foto lebih keliatan).
+SCRIM_STRENGTH = float(os.environ.get("SCRIM_STRENGTH") or 0.78)
 
 CANVAS_W = int(os.environ.get("CANVAS_W") or 1080)
 CANVAS_H = int(os.environ.get("CANVAS_H") or 1350)
@@ -944,9 +946,10 @@ SCRIM_STRIP_TOP = [(0.0,0.45),(0.35,0.18),(0.65,0.05),(1.0,0.0)]   # strip logo/
 SCRIM_STRIP_BOT = [(0.0,0.0),(0.45,0.06),(0.75,0.22),(1.0,0.55)]   # strip footer/tombol bawah (eased)
 
 def _scrim_scaled(stops):
-    """Kalikan kegelapan dgn knob G_SCRIM (revisi 'overlay lebih gelap/terang'), tetap 0..1."""
-    g = G_SCRIM
-    return [(o, _clamp(op * g, 0.0, 1.0)) for o, op in stops]
+    """Kalikan kegelapan dgn ketebalan default (SCRIM_STRENGTH) + knob G_SCRIM
+    (revisi 'overlay lebih gelap/terang'). Hasil tetap 0..1."""
+    k = SCRIM_STRENGTH * G_SCRIM
+    return [(o, _clamp(op * k, 0.0, 1.0)) for o, op in stops]
 
 def _css_stops(stops):
     return ", ".join(f"rgba(0,0,0,{op:.3f}) {o*100:.1f}%" for o, op in stops)
@@ -1065,7 +1068,8 @@ def bake_scrim(im, zone, out_path):
     # feather vertikal buat zona samping: habis mulus di tepi atas & bawah
     vfeather = _mask_v([(0.0, 0), (0.17, 255), (0.83, 255), (1.0, 0)])
 
-    st = SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"])
+    # pakai ketebalan + knob yg sama dgn versi HTML/SVG (_scrim_scaled)
+    st = _scrim_scaled(SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"]))
     if zone in ("left", "right"):
         mask = ImageChops.multiply(_mask_h(_px(st)), vfeather)
     else:  # top / bottom / center -> gradasi vertikal mulus
@@ -1073,13 +1077,9 @@ def bake_scrim(im, zone, out_path):
 
     # strip tipis atas (logo & tagline) + bawah (footer & tombol) SELALU ada,
     # tapi juga mulus (eased) -> digabung pakai 'lighter' (ambil yang tergelap)
-    top_strip = _mask_v(_px([(o * 0.16, op) for o, op in SCRIM_STRIP_TOP] + [(1.0, 0.0)]))
-    bot_strip = _mask_v(_px([(0.0, 0.0)] + [(0.86 + o * 0.14, op) for o, op in SCRIM_STRIP_BOT]))
+    top_strip = _mask_v(_px(_scrim_scaled([(o * 0.16, op) for o, op in SCRIM_STRIP_TOP] + [(1.0, 0.0)])))
+    bot_strip = _mask_v(_px(_scrim_scaled([(0.0, 0.0)] + [(0.86 + o * 0.14, op) for o, op in SCRIM_STRIP_BOT])))
     mask = ImageChops.lighter(ImageChops.lighter(mask, top_strip), bot_strip)
-
-    # knob kegelapan overlay (dari sistem belajar)
-    if G_SCRIM != 1.0:
-        mask = mask.point(lambda v: int(_clamp(v * G_SCRIM, 0, 255)))
 
     # blur tipis -> perhalus lagi, hilangkan sisa banding
     mask = mask.filter(ImageFilter.GaussianBlur(radius=max(14, W // 42)))
