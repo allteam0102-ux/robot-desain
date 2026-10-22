@@ -741,7 +741,8 @@ def _box_crop_to_aspect(im, box_px, target):
     x0 = cx - cw / 2.0; y0 = cy - ch / 2.0
     x0 = max(0, min(W - cw, x0)); y0 = max(0, min(H - ch, y0))
     im2 = im.crop((int(round(x0)), int(round(y0)), int(round(x0 + cw)), int(round(y0 + ch))))
-    return im2.resize((CANVAS_W, CANVAS_H), Image.LANCZOS)
+    rect = (x0 / W, y0 / H, (x0 + cw) / W, (y0 + ch) / H)   # posisi crop (fraksi) utk crop editable di Figma
+    return im2.resize((CANVAS_W, CANVAS_H), Image.LANCZOS), rect
 
 def ai_focus_box(image_path, context):
     """Tanya MATA AI: bagian foto mana yg PALING nyambung sama konteks slide.
@@ -828,7 +829,7 @@ def local_focus_box(im):
 
 def smart_crop_canvas(im, context=""):
     """Crop ke kanvas, 3 lapis: 1) AI (konteks) kalau nyala & kuota ada; 2) deteksi WAJAH lokal (gratis);
-    3) crop tengah. Balikin (image, metode: 'ai'/'wajah'/None)."""
+    3) crop tengah. Balikin (image, metode: 'ai'/'lokal'/None, rect_crop_fraksi atau None)."""
     # --- 1) AI context crop ---
     if SMART_CROP_ENABLED and context and (GROQ_API_KEY or GEMINI_API_KEY):
         tmp = None
@@ -842,7 +843,8 @@ def smart_crop_canvas(im, context=""):
                 bx1 = min(W, (x + w + pad) * W); by1 = min(H, (y + h + pad) * H)
                 if bx1 - bx0 >= 8 and by1 - by0 >= 8:
                     print(f"    [smart-crop] AI fokus box={tuple(round(v, 2) for v in box)}")
-                    return _box_crop_to_aspect(im, (bx0, by0, bx1, by1), CANVAS_W / CANVAS_H), "ai"
+                    cropped, rect = _box_crop_to_aspect(im, (bx0, by0, bx1, by1), CANVAS_W / CANVAS_H)
+                    return cropped, "ai", rect
         except Exception as e:
             print("    ! smart-crop AI gagal:", e)
         finally:
@@ -860,11 +862,12 @@ def smart_crop_canvas(im, context=""):
                 bx1 = min(W, (x + w + pad) * W); by1 = min(H, (y + h + pad) * H)
                 if bx1 - bx0 >= 8 and by1 - by0 >= 8:
                     print("    [smart-crop] pakai fokus LOKAL (wajah/saliency)")
-                    return _box_crop_to_aspect(im, (bx0, by0, bx1, by1), CANVAS_W / CANVAS_H), "lokal"
+                    cropped, rect = _box_crop_to_aspect(im, (bx0, by0, bx1, by1), CANVAS_W / CANVAS_H)
+                    return cropped, "lokal", rect
         except Exception as e:
             print("    ! crop lokal gagal:", e)
-    # --- 3) crop tengah ---
-    return crop_canvas(im), None
+    # --- 3) crop tengah (rect=None -> di HTML pakai cover tengah, tetap full & editable) ---
+    return crop_canvas(im), None, None
 
 def film_grade(im):
     """Sentuhan film halus: warna natural-nyala (nggak kusam), kontras tipis, hangat tipis.
@@ -1664,9 +1667,24 @@ body{{background:#444;}}
         else:
             tag_txt, body_txt = "FFFFFF", "FFFFFF"
         # foto BERSIH + overlay gelap TERPISAH (biar masking editable sendiri di Figma)
+        full_p = s.get("full_path")
+        rect = s.get("crop_rect")
         bgp = s.get("clean_path") or s.get("image_path")
         parts = []
-        if bgp:
+        if full_p:
+            # FOTO UTUH + crop sebagai FRAME -> di Figma fotonya nggak kepotong permanen,
+            # double-click bisa atur ulang cropannya. Sama persis sama preview-nya.
+            if rect:
+                x0, y0, x1, y1 = rect
+                cw = max(1e-3, x1 - x0); ch = max(1e-3, y1 - y0)
+                st = (f"position:absolute;left:{-x0/cw*100:.3f}%;top:{-y0/ch*100:.3f}%;"
+                      f"width:{100/cw:.3f}%;height:{100/ch:.3f}%;max-width:none;object-fit:fill;")
+            else:  # crop tengah -> cover tengah (tetap foto utuh, bisa diatur di Figma)
+                st = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 50%;"
+            parts.append(f'<img src="{_img_data_uri(full_p)}" style="{st}">')
+            if theme == "dark" and s.get("kind") != "cta":
+                parts.append(_html_scrim(s.get("zone", "bottom")))
+        elif bgp:
             parts.append(f'<img class="bg" src="{_img_data_uri(bgp)}">')
             if theme == "dark" and s.get("kind") != "cta":
                 parts.append(_html_scrim(s.get("zone", "bottom")))
@@ -2630,6 +2648,8 @@ def process_page(page, workdir, mem=None, revision=None):
         base = None
         theme = "dark"
         is_custom = False
+        full_img = None       # foto UTUH (buat crop editable di Figma lewat HTML)
+        crop_rect = None      # (x0,y0,x1,y1) fraksi posisi crop di foto utuh
         if wants_custom:
             cdata = download_image_bytes(cimg_url) if cimg_url else None
             if cdata is None:                       # nggak ada URL / URL gagal -> coba tempelan Notion
@@ -2639,8 +2659,9 @@ def process_page(page, workdir, mem=None, revision=None):
             if cdata is not None:
                 try:
                     cim = Image.open(io.BytesIO(cdata)).convert("RGB")
-                    base, _sc = smart_crop_canvas(cim, (headline + " " + body))  # gambar sendiri: JANGAN di-film-grade (biar doodle tetap bersih)
+                    base, _sc, crop_rect = smart_crop_canvas(cim, (headline + " " + body))  # gambar sendiri: JANGAN di-film-grade (biar doodle tetap bersih)
                     if _sc: smart_crop_slides.append(i)
+                    full_img = cim                      # foto custom utuh -> crop editable di Figma
                     theme = pick_theme(base, forced_theme)
                     is_custom = True
                     credits.append(f"Slide {i}: (gambar sendiri / custom, tema {theme})")
@@ -2679,7 +2700,7 @@ def process_page(page, workdir, mem=None, revision=None):
             else:
                 im = make_placeholder()
                 credits.append(f"Slide {i}: (background netral — gambar '{q}' tak ditemukan)")
-            _cim, _sc = smart_crop_canvas(im, (headline + " " + body))
+            _cim, _sc, crop_rect = smart_crop_canvas(im, (headline + " " + body))
             if _sc: smart_crop_slides.append(i)
             graded = film_grade(_cim)
             # terapkan GAYA ke foto stok
@@ -2689,10 +2710,13 @@ def process_page(page, workdir, mem=None, revision=None):
                 base = make_card_bg(graded); theme = "card"      # foto atas + kartu putih bawah
             elif eff_style in ("doodle", "doodle_top"):
                 base = graded; theme = pick_theme(graded, forced_theme)  # doodle idealnya pakai [img]
+                full_img = film_grade(im)                                # foto utuh -> crop editable di Figma
             elif eff_style == "stabilo":
                 base = graded; theme = "dark"                            # foto gelap + sapuan stabilo di judul
+                full_img = film_grade(im)
             else:
                 base = graded; theme = forced_theme or "dark"
+                full_img = film_grade(im)                                # foto utuh -> crop editable di Figma
 
         # posisi teks (zone) sesuai gaya
         if eff_style == "card" and not is_custom:
@@ -2706,6 +2730,14 @@ def process_page(page, workdir, mem=None, revision=None):
 
         clean_path = os.path.join(workdir, f"clean_{i}.png")
         base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
+        # FOTO UTUH (buat crop editable di Figma lewat HTML): disimpan kalau ada
+        full_path = None
+        if full_img is not None and OUTPUT_HTML:
+            try:
+                full_path = os.path.join(workdir, f"full_{i}.png")
+                full_img.save(full_path, "PNG")
+            except Exception as _fe:
+                print("    ! gagal simpan foto utuh:", _fe); full_path = None
         # simpan gambar bersih ke CACHE (buat revisi pakai-ulang per-slide)
         try:
             base.save(os.path.join(_page_cache_dir(page_id), f"slide_{i}.png"), "PNG")
@@ -2720,6 +2752,7 @@ def process_page(page, workdir, mem=None, revision=None):
         preview_paths.append(img_path)
         slides_data.append({"kind": "normal", "headline": headline, "body": body,
                             "image_path": img_path, "clean_path": clean_path,
+                            "full_path": full_path, "crop_rect": crop_rect,
                             "index": i, "total": total, "zone": zone,
                             "theme": theme, "style": eff_style})
 
