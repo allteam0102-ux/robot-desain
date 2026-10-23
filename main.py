@@ -2008,8 +2008,10 @@ def local_parse_command(text):
          "slides": _slide_nums_in(text), "note": "", "action": "none"}
     notes = []
     # sasaran: apakah nyebut "judul" atau "body/isi" spesifik? kalau "teks" aja -> dua-duanya
-    hit_judul = has("judul", "headline", "tulisan besar", "title")
-    hit_body  = has("body", "isi", "caption", "deskripsi", "paragraf", "teks kecil")
+    hit_judul = has("judul", "headline", "tulisan besar", "title",
+                    "atas", "yang atas", "teks atas", "bagian atas", "tulisan atas")
+    hit_body  = has("body", "isi", "caption", "deskripsi", "paragraf", "teks kecil",
+                    "bawah", "yang bawah", "teks bawah", "bagian bawah", "tulisan bawah")
     both = (not hit_judul and not hit_body)   # "teks" umum -> kena dua-duanya
 
     # --- UKURAN ---
@@ -2022,6 +2024,11 @@ def local_parse_command(text):
         if hit_judul or both: d["head_scale_delta"] += 0.12
         if hit_body  or both: d["body_scale_delta"] += 0.10
         notes.append("teks digedein")
+    # "samain / ukuran sama" -> dekatkan: judul diturunin, body dinaikin (ulang biar makin dekat)
+    if has("samain", "ukuran sama", "ukurannya sama", "sama besar", "sama gede", "seragam", "disamain", "biar sama", "samakan"):
+        d["head_scale_delta"] -= 0.10
+        d["body_scale_delta"] += 0.10
+        notes.append("ukuran judul & body didekatin")
 
     # --- OVERLAY / KETERBACAAN ---
     if has("susah kebaca", "susah dibaca", "ga kebaca", "nggak kebaca", "gak kebaca", "kurang jelas", "nggak jelas", "ga jelas", "overlay kurang gelap", "kurang gelap", "lebih gelap", "pergelap", "pertegas"):
