@@ -2017,7 +2017,8 @@ def local_parse_command(text):
         if hit_judul or both: d["head_scale_delta"] -= 0.12
         if hit_body  or both: d["body_scale_delta"] -= 0.10
         notes.append("teks dikecilin")
-    if has("kekecilan", "kekecilen", "kecil banget", "terlalu kecil", "gedein", "perbesar", "besarin", "gedekan", "lebih besar", "lebih gede"):
+    if has("kekecilan", "kekecilen", "kecil banget", "terlalu kecil", "gedein", "perbesar", "besarin", "gedekan",
+           "lebih besar", "lebih gede", "kurang besar", "kurang gede", "kurang gedhe", "krg besar", "kurang gede banget"):
         if hit_judul or both: d["head_scale_delta"] += 0.12
         if hit_body  or both: d["body_scale_delta"] += 0.10
         notes.append("teks digedein")
@@ -2032,13 +2033,14 @@ def local_parse_command(text):
     if has("lebih soft", "lebih lembut", "lebih film", "lebih pudar", "soft", "lembutin", "pudarin", "vintage"):
         d["soft_delta"] += 0.10; notes.append("foto dibikin lembut")
     if has("lebih cerah", "lebih terang", "lebih tajam", "cerahin", "terangin", "tajamin", "jangan pudar",
-           "jangan soft", "kusam", "vivid", "nyala", "pucat", "warnanya kurang", "warna kurang", "jangan kusam"):
+           "jangan soft", "kusam", "vivid", "nyala", "pucat", "warnanya kurang", "warna kurang", "jangan kusam",
+           "kurang terang", "kurang cerah", "kurang nyala"):
         d["soft_delta"] -= 0.12; notes.append("foto dibikin lebih nyala/cerah")
 
     # --- BOLD JUDUL ---
     if has("jangan bold", "ga bold", "gak bold", "nggak bold", "tanpa bold", "jangan tebal", "jangan tebel", "ga tebal", "nggak tebal", "tipisin", "tipis", "jangan ada yang bold", "nggak ada yang bold", "ga ada yang bold"):
         d["head_bold"] = False; notes.append("judul dibikin tipis")
-    elif has("dibold", "di bold", "pakai bold", "tebelin", "tebalin", "dipertebal", "pertebal", "judul tebal", "judul bold", "bold lagi", "tebal lagi"):
+    elif has("dibold", "di bold", "pakai bold", "tebelin", "tebalin", "dipertebal", "pertebal", "judul tebal", "judul bold", "bold lagi", "tebal lagi", "kurang tebal", "kurang tebel", "kurang bold"):
         d["head_bold"] = True; notes.append("judul dibikin tebal")
 
     # --- GANTI FOTO ---
@@ -2058,17 +2060,26 @@ def local_parse_command(text):
     return d
 
 def _merge_cmd(ai_data, local):
-    """Gabung hasil AI + lokal. Lokal MENAMBAL yg AI lewatin, biar ketikan selalu ngefek."""
+    """Gabung hasil AI + lokal. Buat knob yg lokal YAKIN (kata kunci jelas), LOKAL MENANG
+    atas AI — soalnya AI sering salah arah di frasa 'kurang X'. AI cuma ngisi yg lokal 0."""
     if not ai_data:
         return local
     for k in ("head_scale_delta", "body_scale_delta", "scrim_delta", "soft_delta"):
         try:
-            if abs(float(ai_data.get(k, 0) or 0)) < 0.01 and abs(float(local.get(k, 0) or 0)) >= 0.01:
-                ai_data[k] = local[k]
+            if abs(float(local.get(k, 0) or 0)) >= 0.01:
+                ai_data[k] = local[k]          # lokal override (lebih bisa dipercaya)
         except Exception:
             pass
-    if ai_data.get("head_bold", None) is None and local.get("head_bold", None) is not None:
-        ai_data["head_bold"] = local["head_bold"]
+    # kalau lokal udah pegang kendali UKURAN, jangan biarin AI ngutak knob ukuran yg nggak disebut
+    local_size = (abs(local.get("head_scale_delta", 0) or 0) >= 0.01
+                  or abs(local.get("body_scale_delta", 0) or 0) >= 0.01)
+    if local_size:
+        if abs(local.get("head_scale_delta", 0) or 0) < 0.01:
+            ai_data["head_scale_delta"] = 0.0
+        if abs(local.get("body_scale_delta", 0) or 0) < 0.01:
+            ai_data["body_scale_delta"] = 0.0
+    if local.get("head_bold", None) is not None:
+        ai_data["head_bold"] = local["head_bold"]   # lokal override kalau yakin
     if not ai_data.get("new_photo") and local.get("new_photo"):
         ai_data["new_photo"] = True
     if not ai_data.get("slides") and local.get("slides"):
