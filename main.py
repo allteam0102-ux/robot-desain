@@ -584,6 +584,38 @@ def record_photos_used(mem, ids):
         if pid:
             hist[str(pid)] = now
 
+def _unsplash_candidates(query):
+    """Daftar kandidat foto Unsplash (search) tanpa download. [] kalau gagal/kosong."""
+    r = requests.get("https://api.unsplash.com/search/photos",
+                     headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+                     params={"query": _short_q(query), "per_page": 15, "orientation": PEXELS_ORIENTATION}, timeout=60)
+    r.raise_for_status()
+    out = []
+    for p in r.json().get("results", []):
+        urls = p.get("urls", {})
+        u = urls.get("regular") or urls.get("full") or urls.get("raw")
+        if u and p.get("id"):
+            name = (p.get("user") or {}).get("name", "-")
+            out.append({"id": str(p["id"]), "url": u, "credit": f"Foto: {name} (Unsplash)"})
+    return out
+
+def _pexels_candidates(query):
+    """Daftar kandidat foto Pexels (search) tanpa download. [] kalau gagal/kosong."""
+    def _search(q):
+        r = requests.get("https://api.pexels.com/v1/search",
+                         headers={"Authorization": PEXELS_API_KEY},
+                         params={"query": q, "per_page": 15, "orientation": PEXELS_ORIENTATION}, timeout=60)
+        r.raise_for_status()
+        return r.json().get("photos", [])
+    photos = _search(_short_q(query)) or _search(_short_q(query, add_hint=False))
+    out = []
+    for p in photos:
+        src = p.get("src", {})
+        u = src.get("large2x") or src.get("large") or src.get("original")
+        if u and p.get("id"):
+            out.append({"id": str(p["id"]), "url": u, "credit": f'Foto: {p.get("photographer","-")} (Pexels)'})
+    return out
+
 def image_pick(query, used_ids):
     # 1) SUMBER PRIBADI dulu: collection akun user (kalau diisi)
     if UNSPLASH_COLLECTIONS and UNSPLASH_ACCESS_KEY:
@@ -610,16 +642,32 @@ def image_pick(query, used_ids):
     # kalau user mau HANYA foto simpenan & memang sudah set sumber pribadi -> stop (jangan ke internet umum)
     if PERSONAL_IMAGES_ONLY and (UNSPLASH_COLLECTIONS or UNSPLASH_LIKES_USER or PEXELS_COLLECTIONS):
         return None, None
-    # 2) CADANGAN: cari di internet umum (perilaku lama)
-    sources = (["unsplash", "pexels"] if UNSPLASH_ACCESS_KEY else ["pexels"])
+    # 2) UMUM: GABUNG kandidat Unsplash + Pexels jadi satu, baru pilih acak.
+    #    Jadi nggak maksa Unsplash — kalau Unsplash kurang nyambung, Pexels tetap dapet giliran.
     for q in [query] + FALLBACK_QUERIES:
-        for src in sources:
+        cands = []
+        if UNSPLASH_ACCESS_KEY:
             try:
-                data, credit = (unsplash_pick if src == "unsplash" else pexels_pick)(q, used_ids)
-                if data:
-                    return data, credit
+                cands += _unsplash_candidates(q)
             except Exception as e:
-                print(f"    ! {src} gagal ('{_short_q(q)}'): {e}")
+                print(f"    ! unsplash cari gagal ('{_short_q(q)}'): {e}")
+        if PEXELS_API_KEY:
+            try:
+                cands += _pexels_candidates(q)
+            except Exception as e:
+                print(f"    ! pexels cari gagal ('{_short_q(q)}'): {e}")
+        if not cands:
+            continue
+        fresh = [c for c in cands if str(c["id"]) not in used_ids] or cands
+        random.shuffle(fresh)            # Unsplash & Pexels tercampur -> peluang adil
+        for c in fresh[:12]:
+            try:
+                d = requests.get(c["url"], timeout=60).content
+                Image.open(io.BytesIO(d)).verify()
+                used_ids.add(str(c["id"]))
+                return d, c["credit"]
+            except Exception:
+                continue
     return None, None
 
 # ---------- FITUR: BAWA GAMBAR SENDIRI (mis. hasil doodle Gemini) ----------
