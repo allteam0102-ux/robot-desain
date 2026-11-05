@@ -2257,14 +2257,22 @@ def _latest_pending(mem):
     return best
 
 def ai_image_keywords(slide_texts):
-    """1 panggilan AI (Gemini/Groq) -> kata kunci FOTO (Inggris, aesthetic) per slide. None kalau gagal."""
+    """1 panggilan AI (Gemini/Groq) -> query FOTO (Inggris, TOPIK/subjek konkret) per slide. None kalau gagal."""
     if not AI_CHAT_ENABLED or not slide_texts:
         return None
     joined = "\n".join(f"{i+1}. {(t or '')[:160]}" for i, t in enumerate(slide_texts))
     prompt = (
-        "Kamu art director untuk brand konseling pernikahan (gaya editorial/aesthetic luar negeri, nuansa sinematik & soft).\n"
-        "Untuk TIAP slide di bawah, buat 1 kata kunci pencarian FOTO STOK dalam BAHASA INGGRIS (3-5 kata), "
-        "fokus ke suasana/visual (bukan terjemahan harfiah teks), hindari tulisan/logo, utamakan natural light & tone lembut.\n"
+        "Kamu pemilih FOTO STOK untuk konten brand konseling pernikahan & keislaman.\n"
+        "Untuk TIAP slide, tentukan 1 query pencarian foto stok BAHASA INGGRIS (2-4 kata) yang menggambarkan "
+        "ADEGAN/SUBJEK KONKRET paling mewakili MAKNA teksnya — orang/benda/situasi yang bisa difoto, "
+        "BUKAN kata abstrak atau mood. Pikirkan: 'kalau teks ini jadi 1 foto, foto apa yang pas?'.\n"
+        "Contoh:\n"
+        "- 'komunikasi suami istri' -> 'couple talking at home'\n"
+        "- 'cemburu dalam hubungan' -> 'upset couple arguing'\n"
+        "- 'ketenangan hati saat sholat' -> 'muslim woman praying peaceful'\n"
+        "- 'keluarga harmonis' -> 'happy muslim family together'\n"
+        "- 'sabar menghadapi ujian' -> 'thoughtful man looking out window'\n"
+        "Utamakan SUBJEK dulu; boleh tambah 1 kata nuansa (soft / natural light) di akhir. Hindari tulisan/logo.\n"
         'Balas HANYA JSON object: {"keywords": ["...", "..."]} dengan panjang array PERSIS sama dengan jumlah slide.\n\n' + joined)
     data = ai_json(prompt)
     try:
