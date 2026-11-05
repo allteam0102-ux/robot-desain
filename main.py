@@ -2017,8 +2017,12 @@ GEMINI_MODEL    = os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash"
 GEMINI_VISION_FALLBACKS = [m.strip() for m in (os.environ.get("GEMINI_VISION_FALLBACKS") or "gemini-3.5-flash,gemini-3.6-flash").split(",") if m.strip()]
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL      = os.environ.get("GROQ_MODEL") or "openai/gpt-oss-20b"
+# --- OpenAI (Luna) = OTAK UTAMA kalau OPENAI_API_KEY diisi; gratisan jadi cadangan ---
+OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL    = os.environ.get("OPENAI_MODEL") or "gpt-6-luna"
+OPENAI_BASE     = (os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
 AI_CHAT_ENABLED = ((os.environ.get("AI_CHAT_ENABLED") or "true").lower() == "true"
-                   and (bool(GEMINI_API_KEY) or bool(GROQ_API_KEY)))
+                   and (bool(OPENAI_API_KEY) or bool(GEMINI_API_KEY) or bool(GROQ_API_KEY)))
 # cek mandiri pakai 'mata' AI (Groq/Gemini vision). aktif kalau salah satu key ada.
 VISION_CHECK_ENABLED = ((os.environ.get("VISION_CHECK_ENABLED") or "true").lower() == "true"
                         and (bool(GEMINI_API_KEY) or bool(GROQ_API_KEY)))
@@ -2055,23 +2059,46 @@ def _groq_json(prompt):
     except Exception as e:
         print("    ! Groq gagal:", e); return None
 
-AI_PRIMARY = (os.environ.get("AI_PRIMARY") or "groq").lower()   # 'groq' (stabil) atau 'gemini'
+def _openai_json(prompt):
+    """OpenAI (mis. GPT-6 Luna). Otak UTAMA kalau OPENAI_API_KEY diisi."""
+    if not OPENAI_API_KEY:
+        return None
+    try:
+        r = requests.post(f"{OPENAI_BASE}/chat/completions",
+                          headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                          json={"model": OPENAI_MODEL,
+                                "messages": [{"role": "user",
+                                              "content": prompt + "\n\nJawab HANYA dengan JSON valid, tanpa teks lain."}]},
+                          timeout=60)
+        if r.status_code != 200:
+            print(f"    ! OpenAI {r.status_code}: {r.text[:140]}")
+            return None
+        content = r.json()["choices"][0]["message"]["content"]
+        return _json_from_text(content)
+    except Exception as e:
+        print("    ! OpenAI gagal:", e); return None
+
+# Urutan otak: 'openai' (Luna utama) -> gratis cadangan. Bisa diubah via AI_PRIMARY.
+AI_PRIMARY = (os.environ.get("AI_PRIMARY") or "openai").lower()   # 'openai' / 'groq' / 'gemini'
 
 def ai_json(prompt):
-    """Minta jawaban JSON ke AI. Default: Groq dulu (lebih stabil), Gemini cadangan.
-    Bisa dibalik lewat secret AI_PRIMARY=gemini."""
+    """Minta jawaban JSON ke AI. Default: OpenAI/Luna UTAMA, lalu gratis (Groq/Gemini) cadangan.
+    Kalau OPENAI_API_KEY kosong, otomatis langsung pakai yang gratis."""
     if not AI_CHAT_ENABLED:
         return None
     if AI_PRIMARY == "gemini":
-        first, second, second_name = _gemini_json, _groq_json, "Groq"
-    else:
-        first, second, second_name = _groq_json, _gemini_json, "Gemini"
-    data = first(prompt)
-    if data is None:
-        data = second(prompt)   # cadangan kalau yang utama ngadat
+        chain = [("Gemini", _gemini_json), ("Groq", _groq_json), ("OpenAI/Luna", _openai_json)]
+    elif AI_PRIMARY == "groq":
+        chain = [("Groq", _groq_json), ("Gemini", _gemini_json), ("OpenAI/Luna", _openai_json)]
+    else:  # 'openai' (default): Luna utama
+        chain = [("OpenAI/Luna", _openai_json), ("Groq", _groq_json), ("Gemini", _gemini_json)]
+    for idx, (name, fn) in enumerate(chain):
+        data = fn(prompt)
         if data is not None:
-            print(f"    (pakai {second_name} sebagai cadangan)")
-    return data
+            if idx > 0:
+                print(f"    (pakai {name} sebagai cadangan)")
+            return data
+    return None
 
 AI_PROMPT = """Kamu asisten desain untuk bot konten Instagram (brand Nikah Institute).
 User memberi perintah/feedback (bahasa Indonesia atau Inggris) untuk merevisi sebuah desain.
