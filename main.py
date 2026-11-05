@@ -502,7 +502,7 @@ def unsplash_pick_collection(query, used_ids):
             print(f"    ! Unsplash collection search {r.status_code}")
     except Exception as e:
         print("    ! Unsplash collection search gagal:", e)
-    return _unsplash_collection_random(used_ids)   # nggak ada yg match -> ambil apa aja dari koleksi
+    return None, None   # NGGAK ada yg cocok di koleksi -> biar image_pick lanjut ke pencarian COCOK global (jangan acak)
 
 def unsplash_pick_likes(used_ids):
     """Ambil foto dari LIKES (❤️) akun Unsplash user (acak). Publik, cuma butuh username."""
@@ -617,7 +617,9 @@ def _pexels_candidates(query):
     return out
 
 def image_pick(query, used_ids):
-    # 1) SUMBER PRIBADI dulu: collection akun user (kalau diisi)
+    # 1) SUMBER PRIBADI: cari foto yg COCOK (keyword) di koleksi Unsplash kamu.
+    #    - Ketemu yg cocok -> pakai (kurasi kamu + nyambung konteks).
+    #    - NGGAK ada yg cocok -> JANGAN ambil acak; lanjut ke pencarian COCOK global (step 2).
     if UNSPLASH_COLLECTIONS and UNSPLASH_ACCESS_KEY:
         try:
             data, credit = unsplash_pick_collection(query, used_ids)
@@ -625,22 +627,30 @@ def image_pick(query, used_ids):
                 return data, credit
         except Exception as e:
             print("    ! sumber Unsplash collection gagal:", e)
-    if UNSPLASH_LIKES_USER and UNSPLASH_ACCESS_KEY:
-        try:
-            data, credit = unsplash_pick_likes(used_ids)
-            if data:
-                return data, credit
-        except Exception as e:
-            print("    ! sumber Unsplash likes gagal:", e)
-    if PEXELS_COLLECTIONS:
-        try:
-            data, credit = pexels_pick_collection(query, used_ids)
-            if data:
-                return data, credit
-        except Exception as e:
-            print("    ! sumber Pexels pribadi gagal:", e)
-    # kalau user mau HANYA foto simpenan & memang sudah set sumber pribadi -> stop (jangan ke internet umum)
+    # Hanya kalau user minta FOTO PRIBADI SAJA -> baru boleh ambil ACAK dari koleksi/likes
+    # (lebih baik foto on-brand acak daripada nggak ada sama sekali).
     if PERSONAL_IMAGES_ONLY and (UNSPLASH_COLLECTIONS or UNSPLASH_LIKES_USER or PEXELS_COLLECTIONS):
+        if UNSPLASH_COLLECTIONS and UNSPLASH_ACCESS_KEY:
+            try:
+                data, credit = _unsplash_collection_random(used_ids)
+                if data:
+                    return data, credit
+            except Exception as e:
+                print("    ! Unsplash collection (acak) gagal:", e)
+        if UNSPLASH_LIKES_USER and UNSPLASH_ACCESS_KEY:
+            try:
+                data, credit = unsplash_pick_likes(used_ids)
+                if data:
+                    return data, credit
+            except Exception as e:
+                print("    ! Unsplash likes gagal:", e)
+        if PEXELS_COLLECTIONS:
+            try:
+                data, credit = pexels_pick_collection(query, used_ids)
+                if data:
+                    return data, credit
+            except Exception as e:
+                print("    ! Pexels koleksi (acak) gagal:", e)
         return None, None
     # 2) UMUM: GABUNG kandidat Unsplash + Pexels jadi satu, baru pilih acak.
     #    Jadi nggak maksa Unsplash — kalau Unsplash kurang nyambung, Pexels tetap dapet giliran.
@@ -2869,9 +2879,10 @@ def process_page(page, workdir, mem=None, revision=None):
                 q = ai_kws[i - 1].strip()
             else:
                 q = keyword_for(i - 1, keyword_blocks, headline, body)
-            _sh = style_hint(mem)                 # bias ke selera foto yg udah di-approve
-            if _sh:
-                q = (q + " " + _sh).strip()
+            # style_hint (vibe) sengaja TIDAK ditempel ke query pencarian:
+            # bikin hasil ke-bias "vibe" dan malah nggak nyambung TOPIK konten.
+            # Vibe tetap kejaga karena foto diprioritaskan dari koleksi kurasi kamu.
+            _sh = ""
             _before = set(used_ids)
             data, credit = image_pick(q, used_ids)
             if data:
