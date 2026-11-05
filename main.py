@@ -1006,25 +1006,64 @@ def _busy(gray, box):
     except Exception:
         return 999.0
 
+def _zone_stats(gray, box):
+    """(detail/stddev, kecerahan/mean 0-255) untuk satu kotak."""
+    try:
+        st = ImageStat.Stat(gray.crop(box))
+        return st.stddev[0], st.mean[0]
+    except Exception:
+        return 999.0, 128.0
+
 def analyze_zone(im):
-    """Pilih area teks di bagian paling 'kosong' (detail paling rendah)."""
+    """Pilih area teks di bagian paling 'kosong' (detail rendah) DAN tidak terlalu
+    terang (biar teks putih tetap kebaca). Skor = detail + penalti area terang."""
     g = im.convert("L")
     W, H = CANVAS_W, CANVAS_H
     xs = [0, W // 3, 2 * W // 3, W]
     ys = [0, H // 3, 2 * H // 3, H]
-    cell = [[_busy(g, (xs[c], ys[r], xs[c + 1], ys[r + 1])) for c in range(3)] for r in range(3)]
+    stt = [[_zone_stats(g, (xs[c], ys[r], xs[c + 1], ys[r + 1])) for c in range(3)] for r in range(3)]
+    busy = [[stt[r][c][0] for c in range(3)] for r in range(3)]
+    lum  = [[stt[r][c][1] for c in range(3)] for r in range(3)]
     def avg(vals): return sum(vals) / len(vals)
+    def sc(busy_vals, lum_vals):
+        # detail + penalti kalau area TERANG (teks putih susah kebaca di latar terang)
+        return avg(busy_vals) + max(0.0, avg(lum_vals) - 135.0) * 0.12
     score = {
-        "top":    avg(cell[0]),
-        "bottom": avg(cell[2]),
-        "left":   avg([cell[0][0], cell[1][0], cell[2][0]]),
-        "right":  avg([cell[0][2], cell[1][2], cell[2][2]]),
-        "center": cell[1][1],
+        "top":    sc(busy[0], lum[0]),
+        "bottom": sc(busy[2], lum[2]),
+        "left":   sc([busy[0][0], busy[1][0], busy[2][0]], [lum[0][0], lum[1][0], lum[2][0]]),
+        "right":  sc([busy[0][2], busy[1][2], busy[2][2]], [lum[0][2], lum[1][2], lum[2][2]]),
+        "center": sc([busy[1][1]], [lum[1][1]]),
     }
     # sedikit condong ke atas/bawah (lebih rapi); kiri/kanan/tengah dipakai kalau jelas lebih kosong
     for z in ("left", "right", "center"):
         score[z] += 3.0
     return min(ZONES, key=lambda z: score[z])
+
+# area foto (fraksi) tempat teks utama duduk, buat ngukur keterbacaan per-zona
+_ZONE_TEXT_REGION = {
+    "top":    (0.05, 0.08, 0.95, 0.44),
+    "bottom": (0.05, 0.50, 0.95, 0.92),
+    "left":   (0.05, 0.30, 0.60, 0.82),
+    "right":  (0.40, 0.30, 0.95, 0.82),
+    "center": (0.10, 0.34, 0.90, 0.82),
+    "card":   (0.05, 0.60, 0.95, 0.92),
+}
+
+def readability_boost(im, zone):
+    """Penjaga keterbacaan: ukur kecerahan area tempat teks duduk.
+    Foto TERANG -> overlay ditebelin (boost > 1) biar teks putih kebaca.
+    Foto udah gelap -> boost = 1.0 (nggak ditambah, biar nggak kelewat gelap)."""
+    try:
+        W, H = im.size
+        fx0, fy0, fx1, fy1 = _ZONE_TEXT_REGION.get(zone, _ZONE_TEXT_REGION["bottom"])
+        box = (int(fx0 * W), int(fy0 * H), int(fx1 * W), int(fy1 * H))
+        lum = ImageStat.Stat(im.convert("L").crop(box)).mean[0]
+    except Exception:
+        return 1.0
+    # lum < 110 (gelap): boost 1.0 ; lum 110..235: naik mulus sampai ~1.6
+    extra = _clamp((lum - 110.0) / 125.0, 0.0, 1.0) * 0.6
+    return round(1.0 + extra, 3)
 
 
 # ---------- layout teks per zona (dipakai pptx & svg) ----------
@@ -1052,10 +1091,11 @@ SCRIM_STOPS = {
 SCRIM_STRIP_TOP = [(0.0,0.45),(0.35,0.18),(0.65,0.05),(1.0,0.0)]   # strip logo/tagline atas (eased)
 SCRIM_STRIP_BOT = [(0.0,0.0),(0.45,0.06),(0.75,0.22),(1.0,0.55)]   # strip footer/tombol bawah (eased)
 
-def _scrim_scaled(stops):
+def _scrim_scaled(stops, boost=1.0):
     """Kalikan kegelapan dgn ketebalan default (SCRIM_STRENGTH) + knob G_SCRIM
-    (revisi 'overlay lebih gelap/terang'). Hasil tetap 0..1."""
-    k = SCRIM_STRENGTH * G_SCRIM
+    (revisi 'overlay lebih gelap/terang') + 'boost' penjaga keterbacaan per-slide
+    (foto terang -> overlay ditebelin biar teks kebaca). Hasil tetap 0..1."""
+    k = SCRIM_STRENGTH * G_SCRIM * float(boost or 1.0)
     return [(o, _clamp(op * k, 0.0, 1.0)) for o, op in stops]
 
 def _css_stops(stops):
@@ -1162,7 +1202,7 @@ def _mask_h(stops):
         px[x, 0] = int(max(0, min(255, _interp(stops, x / (CANVAS_W - 1)))))
     return row.resize((CANVAS_W, CANVAS_H))
 
-def bake_scrim(im, zone, out_path):
+def bake_scrim(im, zone, out_path, boost=1.0):
     """
     Gelapkan area teks dengan masking HALUS (smoothstep + blur), jadi nggak
     ada garis potong. Untuk zona samping (kiri/kanan), gelapnya memudar juga
@@ -1175,8 +1215,8 @@ def bake_scrim(im, zone, out_path):
     # feather vertikal buat zona samping: habis mulus di tepi atas & bawah
     vfeather = _mask_v([(0.0, 0), (0.17, 255), (0.83, 255), (1.0, 0)])
 
-    # pakai ketebalan + knob yg sama dgn versi HTML/SVG (_scrim_scaled)
-    st = _scrim_scaled(SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"]))
+    # pakai ketebalan + knob yg sama dgn versi HTML/SVG (_scrim_scaled) + boost keterbacaan
+    st = _scrim_scaled(SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"]), boost)
     if zone in ("left", "right"):
         mask = ImageChops.multiply(_mask_h(_px(st)), vfeather)
     else:  # top / bottom / center -> gradasi vertikal mulus
@@ -1569,13 +1609,13 @@ def _grad_rad(gid, cx, stops):
     s = "".join(f'<stop offset="{o}" stop-color="#000000" stop-opacity="{op}"/>' for o, op in stops)
     return f'<radialGradient id="{gid}" cx="{cx}" cy="0.5" r="0.8">{s}</radialGradient>'
 
-def _scrim_svg(zone, xo, idx):
+def _scrim_svg(zone, xo, idx, boost=1.0):
     """Kembalikan (defs, rects) berisi gradasi gelap sebagai elemen vektor."""
     W, H = CANVAS_W, CANVAS_H
     gid = f"sc{idx}"
     defs, rects = [], []
-    # gradasi utama sesuai zona (mulus/eased, dikali knob G_SCRIM)
-    st = _scrim_scaled(SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"]))
+    # gradasi utama sesuai zona (mulus/eased, dikali knob G_SCRIM + boost keterbacaan)
+    st = _scrim_scaled(SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"]), boost)
     if zone == "center":
         defs.append(_grad_rad(gid, 0.5, st))
     elif zone in ("left", "right"):
@@ -1630,7 +1670,7 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
                      f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(photo)}"/>')
         # masking vektor cuma utk slide gelap/duotone
         if s.get("kind") != "cta" and scrim_on:
-            d, r = _scrim_svg(s.get("zone", "bottom"), xo, idx)
+            d, r = _scrim_svg(s.get("zone", "bottom"), xo, idx, s.get("scrim_boost", 1.0))
             defs_all.append(d); parts.append(r)
         # logo: versi gelap kalau tema terang (kalau ada)
         use_logo = logo_dark_uri if (dark_logo and logo_dark_uri) else logo_uri
@@ -1715,11 +1755,11 @@ def _html_rich(text):
         lines.append(frag)
     return "<br>".join(lines)
 
-def _html_scrim(zone):
+def _html_scrim(zone, boost=1.0):
     """Overlay gelap (masking) sebagai div CSS TERPISAH dari foto -> editable sendiri di Figma.
     Gradasi disamain sama versi SVG per-zona + strip atas (logo/tagline) & bawah (footer/CTA)."""
     H = CANVAS_H
-    st = _scrim_scaled(SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"]))
+    st = _scrim_scaled(SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"]), boost)
     if zone == "center":
         main = f"radial-gradient(ellipse 80% 80% at 50% 50%, {_css_stops(st)})"
     elif zone in ("left", "right"):
@@ -1790,11 +1830,11 @@ body{{background:#444;}}
                 st = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 50%;"
             parts.append(f'<img src="{_img_data_uri(full_p)}" style="{st}">')
             if theme == "dark" and s.get("kind") != "cta":
-                parts.append(_html_scrim(s.get("zone", "bottom")))
+                parts.append(_html_scrim(s.get("zone", "bottom"), s.get("scrim_boost", 1.0)))
         elif bgp:
             parts.append(f'<img class="bg" src="{_img_data_uri(bgp)}">')
             if theme == "dark" and s.get("kind") != "cta":
-                parts.append(_html_scrim(s.get("zone", "bottom")))
+                parts.append(_html_scrim(s.get("zone", "bottom"), s.get("scrim_boost", 1.0)))
         use_logo = logo_dark_uri if (theme == "light" and logo_dark_uri) else logo_uri
         if use_logo:
             parts.append(f'<img class="logo" src="{use_logo}">')
@@ -2975,8 +3015,10 @@ def process_page(page, workdir, mem=None, revision=None):
         except Exception as _ce:
             print("    ! gagal simpan cache slide:", _ce)
         img_path = os.path.join(workdir, f"slide_{i}.png")
+        # penjaga keterbacaan: foto terang -> overlay ditebelin otomatis (foto gelap dibiarin)
+        scrim_boost = readability_boost(base, zone) if theme == "dark" else 1.0
         if theme == "dark":
-            bake_scrim(base, zone, img_path)                # overlay gelap (gaya gelap/duotone)
+            bake_scrim(base, zone, img_path, scrim_boost)   # overlay gelap (gaya gelap/duotone)
         else:                                               # card / light -> tanpa overlay gelap
             base.save(img_path, "PNG")
         preview_paths.append(img_path)
@@ -2984,6 +3026,7 @@ def process_page(page, workdir, mem=None, revision=None):
                             "image_path": img_path, "clean_path": clean_path,
                             "full_path": full_path, "crop_rect": crop_rect,
                             "index": i, "total": total, "zone": zone,
+                            "scrim_boost": scrim_boost,
                             "theme": theme, "style": eff_style})
 
         # --- #2 CEK MANDIRI (AI vision) — CUKUP slide COVER biar hemat kuota gratis Gemini ---
