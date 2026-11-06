@@ -1096,7 +1096,8 @@ def _scrim_scaled(stops, boost=1.0):
     (revisi 'overlay lebih gelap/terang') + 'boost' penjaga keterbacaan per-slide
     (foto terang -> overlay ditebelin biar teks kebaca). Hasil tetap 0..1."""
     k = SCRIM_STRENGTH * G_SCRIM * float(boost or 1.0)
-    return [(o, _clamp(op * k, 0.0, 1.0)) for o, op in stops]
+    # cap 0.96 (bukan 1.0): hindari area hitam pekat rata -> gradasi tetap mulus
+    return [(o, _clamp(op * k, 0.0, 0.96)) for o, op in stops]
 
 def _css_stops(stops):
     return ", ".join(f"rgba(0,0,0,{op:.3f}) {o*100:.1f}%" for o, op in stops)
@@ -1140,6 +1141,11 @@ def _est_lines(text, width_px, font_px, bold):
         lines += 1
     return lines
 
+# leading (jarak antar baris) judul & isi — dipakai fit_text_layout DAN saat render,
+# biar perhitungan muat = hasil render (nggak rapat, nggak numpuk).
+TEXT_HEAD_LH = 1.22
+TEXT_BODY_LH = 1.48
+
 def fit_text_layout(zone, cover, headline, body):
     """Kembalikan ukuran font & posisi (fraksi tinggi) judul+body yang DIJAMIN:
     - body selalu di BAWAH judul (nggak ketimpa)
@@ -1150,7 +1156,7 @@ def fit_text_layout(zone, cover, headline, body):
     bw_px = L["bw"] * W
     hpx = head_px(zone, cover)
     bpx = body_px(zone)
-    HEAD_LH, BODY_LH, GAP = 1.16, 1.34, 0.022
+    HEAD_LH, BODY_LH, GAP = TEXT_HEAD_LH, TEXT_BODY_LH, 0.026
     top0 = L["hy"]
     body_min = L["by"] if cover else (L["hy"] + 0.085)
     bottom = 0.90                      # batas bawah (di atas footer 0.925 / pill CTA 0.90)
@@ -1228,8 +1234,8 @@ def bake_scrim(im, zone, out_path, boost=1.0):
     bot_strip = _mask_v(_px(_scrim_scaled([(0.0, 0.0)] + [(0.86 + o * 0.14, op) for o, op in SCRIM_STRIP_BOT])))
     mask = ImageChops.lighter(ImageChops.lighter(mask, top_strip), bot_strip)
 
-    # blur tipis -> perhalus lagi, hilangkan sisa banding
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(14, W // 42)))
+    # blur -> perhalus lagi, hilangkan sisa banding (dinaikin biar gradasi makin mulus)
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(22, W // 30)))
 
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 255))
     overlay.putalpha(mask)
@@ -1711,11 +1717,11 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
         if s["headline"]:
             parts.append(_svg_text(s["headline"], hx, int(fit["head_top"] * H),
                                    int(L["hw"] * CANVAS_W), fit["head_px"], G_HEAD_BOLD, HEADLINE_FONT,
-                                   anchor=anc, highlight=True, color=head_color, band=head_band))
+                                   anchor=anc, highlight=True, gap=TEXT_HEAD_LH, color=head_color, band=head_band))
         if s["body"]:
             parts.append(_svg_text(s["body"], bx, int(fit["body_top"] * H),
                                    int(L["bw"] * CANVAS_W), fit["body_px"], False, BODY_FONT,
-                                   anchor=anc, highlight=True, color=body_txt))
+                                   anchor=anc, highlight=True, gap=TEXT_BODY_LH, color=body_txt))
         if FOOTER_TEXT:
             parts.append(_svg_text(FOOTER_TEXT, xo + int(0.06*CANVAS_W), int(0.925*H),
                                    int(0.6*CANVAS_W), 20, False, BODY_FONT, color=body_txt))
@@ -1786,8 +1792,8 @@ body{{background:#444;}}
 .logo{{position:absolute;left:{int(0.06*W)}px;top:{int(0.045*H)}px;height:{int(0.05*H)}px;}}
 .tagline{{position:absolute;right:{int(0.06*W)}px;top:{int(0.05*H)}px;
   font-weight:700;font-size:26px;text-align:right;}}
-.hl{{position:absolute;font-weight:700;line-height:1.12;}}
-.bd{{position:absolute;font-weight:400;line-height:1.32;}}
+.hl{{position:absolute;font-weight:700;line-height:1.22;}}
+.bd{{position:absolute;font-weight:400;line-height:1.48;}}
 .footer{{position:absolute;left:{int(0.06*W)}px;top:{int(0.925*H)}px;
   font-size:20px;font-weight:400;max-width:{int(0.58*W)}px;}}
 .footer-c{{position:absolute;left:0;width:{W}px;top:{int(0.925*H)}px;
