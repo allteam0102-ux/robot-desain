@@ -53,6 +53,7 @@ ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "7C3AED").lstrip("#")   # ung
 ACCENT2_COLOR = (os.environ.get("ACCENT2_COLOR") or "159A9A").lstrip("#")  # tosca/teal (warna kedua)
 STABILO_COLOR = (os.environ.get("STABILO_COLOR") or "35D0C8").lstrip("#")  # GAYA 4: sapuan highlighter (tosca cerah)
 STABILO_TXT   = (os.environ.get("STABILO_TXT")   or "16242B").lstrip("#")  # warna teks judul di atas sapuan stabilo
+DECOR_ACCENT  = (os.environ.get("DECOR_ACCENT") or "true").lower() == "true"  # garis aksen dekoratif kecil di atas judul (warna brand)
 LOGO_URL      = os.environ.get("LOGO_URL")      or ""
 LOGO_DARK_URL = os.environ.get("LOGO_DARK_URL") or ""   # logo versi gelap (dipakai di slide background TERANG)
 HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Montserrat"
@@ -1715,6 +1716,10 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
         head_band  = STABILO_COLOR if is_stabilo else None
         fit = fit_text_layout(zone, cover, s.get("headline", ""), s.get("body", ""))
         if s["headline"]:
+            if DECOR_ACCENT and not is_stabilo:
+                _abx = (hx - 32) if anc == "middle" else hx
+                _aby = max(22, int(fit["head_top"] * H) - 28)
+                parts.append(f'<rect x="{_abx}" y="{_aby}" width="64" height="5" rx="2.5" fill="#{ACCENT_COLOR}"/>')
             parts.append(_svg_text(s["headline"], hx, int(fit["head_top"] * H),
                                    int(L["hw"] * CANVAS_W), fit["head_px"], G_HEAD_BOLD, HEADLINE_FONT,
                                    anchor=anc, highlight=True, gap=TEXT_HEAD_LH, color=head_color, band=head_band))
@@ -1862,6 +1867,10 @@ body{{background:#444;}}
         hweight = 700 if G_HEAD_BOLD else 400
         if s.get("headline"):
             hcolor = STABILO_TXT if is_stabilo else body_txt
+            if DECOR_ACCENT and not is_stabilo:
+                _aby = max(22, int(fit["head_top"] * H) - 28)
+                _abx = int((L["hx"] + L["hw"] / 2) * W - 32) if align == "center" else int(L["hx"] * W)
+                parts.append(f'<div style="position:absolute;left:{_abx}px;top:{_aby}px;width:64px;height:5px;border-radius:3px;background:#{ACCENT_COLOR};"></div>')
             inner = _html_rich(s["headline"])
             if is_stabilo:
                 inner = f'<span class="stabilo">{inner}</span>'
