@@ -53,7 +53,7 @@ ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "7C3AED").lstrip("#")   # ung
 ACCENT2_COLOR = (os.environ.get("ACCENT2_COLOR") or "159A9A").lstrip("#")  # tosca/teal (warna kedua)
 STABILO_COLOR = (os.environ.get("STABILO_COLOR") or "35D0C8").lstrip("#")  # GAYA 4: sapuan highlighter (tosca cerah)
 STABILO_TXT   = (os.environ.get("STABILO_TXT")   or "16242B").lstrip("#")  # warna teks judul di atas sapuan stabilo
-DECOR_ACCENT  = (os.environ.get("DECOR_ACCENT") or "true").lower() == "true"  # garis aksen dekoratif kecil di atas judul (warna brand)
+DECOR_ACCENT  = (os.environ.get("DECOR_ACCENT") or "false").lower() == "true"  # garis aksen dekoratif kecil di atas judul (default MATI)
 LOGO_URL      = os.environ.get("LOGO_URL")      or ""
 LOGO_DARK_URL = os.environ.get("LOGO_DARK_URL") or ""   # logo versi gelap (dipakai di slide background TERANG)
 HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Montserrat"
