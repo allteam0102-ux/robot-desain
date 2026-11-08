@@ -1783,6 +1783,42 @@ def _html_scrim(zone, boost=1.0):
         f'<div class="ov" style="top:{int(0.86*H)}px;height:{int(0.14*H)}px;background:linear-gradient(to bottom, {_css_stops(SCRIM_STRIP_BOT)})"></div>'
     )
 
+def _rasterize_svg(svg_path, png_path, w=CANVAS_W, h=CANVAS_H):
+    """SVG -> PNG, biar preview Telegram nunjukin desain JADI (teks+overlay), bukan foto polos.
+    Coba cairosvg (python) dulu, lalu rsvg-convert (CLI). Balikin True kalau sukses."""
+    try:
+        import cairosvg
+        cairosvg.svg2png(url=svg_path, write_to=png_path, output_width=int(w), output_height=int(h))
+        return os.path.exists(png_path)
+    except Exception:
+        pass
+    try:
+        import shutil, subprocess
+        if shutil.which("rsvg-convert"):
+            subprocess.run(["rsvg-convert", "-w", str(int(w)), "-h", str(int(h)),
+                            "-o", png_path, svg_path], check=True, timeout=90)
+            return os.path.exists(png_path)
+    except Exception as e:
+        print("    ! rsvg-convert gagal:", e)
+    return False
+
+_RASTER_WARNED = {"done": False}
+def _preview_render(slide, workdir, logo_path, logo_dark_path, fallback_png):
+    """Render 1 slide jadi PNG lengkap (teks+overlay) lewat SVG. Fallback foto polos kalau gagal."""
+    try:
+        idx = slide.get("index", 1)
+        tsvg = os.path.join(workdir, f"_prev_{idx}.svg")
+        build_svg([slide], tsvg, logo_path, logo_dark_path)
+        tpng = os.path.join(workdir, f"_prev_{idx}.png")
+        if _rasterize_svg(tsvg, tpng):
+            return tpng
+        if not _RASTER_WARNED["done"]:
+            _RASTER_WARNED["done"] = True
+            print("    [preview] rasterizer (cairosvg/rsvg-convert) belum keinstall -> preview pakai foto polos dulu")
+    except Exception as e:
+        print("    ! preview-jadi gagal, pakai foto polos:", e)
+    return fallback_png
+
 def build_html(slides_data, out_path, logo_path, logo_dark_path=None):
     W, H = CANVAS_W, CANVAS_H
     logo_uri = _img_data_uri(logo_path) if logo_path else None
@@ -3099,8 +3135,16 @@ def process_page(page, workdir, mem=None, revision=None):
             lines += ["", "🔎 Cek mandiri: dilewati — kuota AI lagi penuh, nanti dicoba lagi"]
     tg_message("\n".join(lines))
 
-    for i, p in enumerate(preview_paths, start=1):
-        tg_photo(p, caption=f"Preview slide {i}/{total}")
+    # PREVIEW: "potret" desain SVG jadi gambar lengkap (teks+overlay), biar nggak kaya foto nggak jadi.
+    # CTA tetap pakai preview komposit-nya (mockup HP). Fallback foto polos kalau rasterizer belum ada.
+    for i, s in enumerate(slides_data, start=1):
+        _fallback = preview_paths[i - 1] if (i - 1) < len(preview_paths) else None
+        if s.get("kind") == "cta":
+            _shown = _fallback
+        else:
+            _shown = _preview_render(s, workdir, logo_path, logo_dark_path, _fallback)
+        if _shown:
+            tg_photo(_shown, caption=f"Preview slide {i}/{total}")
 
     tg_message(f"📎 ====================\nFILE DESAIN: {title}\n====================")
 
