@@ -791,6 +791,41 @@ def auto_concept(text):
     n = len(re.sub(r"\s+", " ", (text or "")).strip())
     return "panel" if n >= CONCEPT_DENSE_CHARS else "dark"
 
+_CONCEPTS_OK = {"dark", "panel", "card"}
+_ZONES_OK = {"top", "bottom", "left", "right", "center"}
+def luna_layout_plan(texts):
+    """Fase 4: minta AI (Luna) RANCANG layout 1 carousel sekaligus -> concept + zone tiap slide.
+    Balikin list [{concept, zone} | None] panjang = len(texts), atau None kalau AI gagal/mati."""
+    if not texts:
+        return None
+    numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(texts))
+    prompt = (
+        "Kamu layout director carousel Instagram brand konseling pernikahan & keislaman.\n"
+        "Untuk TIAP slide, pilih:\n"
+        "- concept: 'dark' (foto full + teks di atasnya), 'panel' (foto band atas + panel teks besar, buat TEKS PADAT), "
+        "atau 'card' (foto atas + kartu teks bawah).\n"
+        "- zone (hanya dipakai kalau concept 'dark'): posisi teks top/bottom/left/right/center, taruh di area yang paling enak.\n"
+        "Aturan: teks PADAT -> 'panel'. Jaga carousel tetap NYATU tapi JANGAN semua slide sama persis "
+        "(variasikan biar nggak monoton). Slide 1 (cover) biasanya 'dark' + 'bottom'.\n"
+        f"Daftar slide:\n{numbered}\n\n"
+        'Balas HANYA JSON: {"slides":[{"concept":"...","zone":"..."}, ...]} dengan panjang PERSIS sama jumlah slide.')
+    data = ai_json(prompt)
+    if not isinstance(data, dict):
+        return None
+    arr = data.get("slides")
+    if not isinstance(arr, list) or len(arr) != len(texts):
+        return None
+    out = []
+    for item in arr:
+        if not isinstance(item, dict):
+            out.append(None); continue
+        c = str(item.get("concept", "")).lower().strip()
+        z = str(item.get("zone", "")).lower().strip()
+        c = c if c in _CONCEPTS_OK else None
+        z = z if z in _ZONES_OK else None
+        out.append({"concept": c, "zone": z} if c else None)
+    return out
+
 def make_placeholder():
     im = Image.new("RGB", (CANVAS_W, CANVAS_H), (30, 20, 45))
     d = ImageDraw.Draw(im)
@@ -2966,6 +3001,24 @@ def process_page(page, workdir, mem=None, revision=None):
             return u
         return None
 
+    # --- Fase 4: Luna rancang layout 1 carousel sekaligus (concept+zone tiap slide) ---
+    luna_plan = None
+    if CONCEPT_AUTO and AI_CHAT_ENABLED:
+        try:
+            _lt = []
+            for _b in slide_blocks:
+                if is_cta_block(_b):
+                    _lt.append("[slide CTA]")
+                else:
+                    _cb, _, _, _ = extract_custom_image(_b)
+                    _cb, _ = extract_gaya(_cb)
+                    _lt.append(re.sub(r"\s+", " ", _cb).strip()[:220])
+            luna_plan = luna_layout_plan(_lt)
+            if luna_plan:
+                print("  [Luna rancang layout carousel: OK]")
+        except Exception as _le:
+            print("  ! Luna layout plan gagal, pakai aturan:", _le); luna_plan = None
+
     for i, block in enumerate(slide_blocks, start=1):
         # --- SLIDE CTA khusus ---
         if is_cta_block(block):
@@ -2992,7 +3045,11 @@ def process_page(page, workdir, mem=None, revision=None):
         elif i == 1:
             eff_style = content_style
         elif CONCEPT_AUTO and not wants_custom:
-            eff_style = auto_concept(clean_block)   # teks padat -> panel, selainnya dark (anti-monoton)
+            _lp = luna_plan[i - 1] if (luna_plan and (i - 1) < len(luna_plan)) else None
+            if _lp and _lp.get("concept"):
+                eff_style = _lp["concept"]              # Luna yang ngarang konsep
+            else:
+                eff_style = auto_concept(clean_block)   # fallback aturan (Luna mati/ngaco)
         else:
             eff_style = "dark"
 
@@ -3086,7 +3143,11 @@ def process_page(page, workdir, mem=None, revision=None):
         elif i == 1:
             zone = "bottom"                 # cover default: teks bawah
         else:
-            zone = analyze_zone(base)
+            _lp = luna_plan[i - 1] if (luna_plan and (i - 1) < len(luna_plan)) else None
+            if _lp and _lp.get("zone"):
+                zone = _lp["zone"]          # Luna milih posisi teks
+            else:
+                zone = analyze_zone(base)   # fallback: area paling kosong
 
         clean_path = os.path.join(workdir, f"clean_{i}.png")
         base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
