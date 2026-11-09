@@ -54,6 +54,11 @@ ACCENT2_COLOR = (os.environ.get("ACCENT2_COLOR") or "159A9A").lstrip("#")  # tos
 STABILO_COLOR = (os.environ.get("STABILO_COLOR") or "35D0C8").lstrip("#")  # GAYA 4: sapuan highlighter (tosca cerah)
 STABILO_TXT   = (os.environ.get("STABILO_TXT")   or "16242B").lstrip("#")  # warna teks judul di atas sapuan stabilo
 DECOR_ACCENT  = (os.environ.get("DECOR_ACCENT") or "false").lower() == "true"  # garis aksen dekoratif kecil di atas judul (default MATI)
+CONCEPT_AUTO  = (os.environ.get("CONCEPT_AUTO") or "true").lower() == "true"   # pilih konsep per-slide otomatis (teks padat -> panel, anti-monoton)
+try:
+    CONCEPT_DENSE_CHARS = int(os.environ.get("CONCEPT_DENSE_CHARS") or "150")  # >= sekian huruf dianggap 'teks padat' -> konsep panel
+except Exception:
+    CONCEPT_DENSE_CHARS = 150
 LOGO_URL      = os.environ.get("LOGO_URL")      or ""
 LOGO_DARK_URL = os.environ.get("LOGO_DARK_URL") or ""   # logo versi gelap (dipakai di slide background TERANG)
 HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Montserrat"
@@ -764,6 +769,28 @@ def make_card_bg(photo):
         canvas.crop((0, 0, W, strip_h)).convert("RGBA"), overlay).convert("RGB"), (0, 0))
     return canvas
 
+def make_panel_bg(photo):
+    """KONSEP teks-padat: foto band atas (~38%) + panel krem besar (~62%) biar teks banyak tetap lega & kebaca."""
+    W, H = CANVAS_W, CANVAS_H
+    split = int(H * 0.38)
+    canvas = Image.new("RGB", (W, H), (248, 247, 250))
+    ph = photo if photo.size == (W, H) else photo.resize((W, H), Image.LANCZOS)
+    canvas.paste(ph.crop((0, 0, W, split)), (0, 0))
+    strip_h = int(0.14 * H)
+    overlay = Image.new("RGBA", (W, strip_h), (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    for y in range(strip_h):
+        a = int(130 * (1 - y / strip_h))
+        od.line([(0, y), (W, y)], fill=(0, 0, 0, a))
+    canvas.paste(Image.alpha_composite(
+        canvas.crop((0, 0, W, strip_h)).convert("RGBA"), overlay).convert("RGB"), (0, 0))
+    return canvas
+
+def auto_concept(text):
+    """Pilih konsep per slide isi: teks PADAT -> 'panel' (ruang teks besar & kebaca), selainnya 'dark'."""
+    n = len(re.sub(r"\s+", " ", (text or "")).strip())
+    return "panel" if n >= CONCEPT_DENSE_CHARS else "dark"
+
 def make_placeholder():
     im = Image.new("RGB", (CANVAS_W, CANVAS_H), (30, 20, 45))
     d = ImageDraw.Draw(im)
@@ -1075,6 +1102,7 @@ ZONE_LAYOUT = {
     "right":  dict(hx=0.44, hy=0.33, hw=0.50, bx=0.44, by=0.53, bw=0.50, align="left"),
     "center": dict(hx=0.10, hy=0.37, hw=0.80, bx=0.10, by=0.57, bw=0.80, align="center"),
     "card":   dict(hx=0.07, hy=0.615, hw=0.86, bx=0.07, by=0.74, bw=0.86, align="left"),
+    "panel":  dict(hx=0.07, hy=0.44,  hw=0.86, bx=0.07, by=0.55, bw=0.86, align="left"),
 }
 
 # ---------- GRADASI OVERLAY: dibikin MULUS (banyak titik, kurva eased) ----------
@@ -2959,7 +2987,14 @@ def process_page(page, workdir, mem=None, revision=None):
         clean_block, slide_gaya = extract_gaya(clean_block)
         headline, body = headline_and_body(clean_block)
         # gaya efektif: penanda per-slide > gaya cover (slide 1) > default 'dark' (slide lain)
-        eff_style = slide_gaya or (content_style if i == 1 else "dark")
+        if slide_gaya:
+            eff_style = slide_gaya
+        elif i == 1:
+            eff_style = content_style
+        elif CONCEPT_AUTO and not wants_custom:
+            eff_style = auto_concept(clean_block)   # teks padat -> panel, selainnya dark (anti-monoton)
+        else:
+            eff_style = "dark"
 
         base = None
         theme = "dark"
@@ -3029,6 +3064,8 @@ def process_page(page, workdir, mem=None, revision=None):
                 base = duotone_teal(graded); theme = "dark"
             elif eff_style == "card":
                 base = make_card_bg(graded); theme = "card"      # foto atas + kartu putih bawah
+            elif eff_style == "panel":
+                base = make_panel_bg(graded); theme = "card"     # foto band atas + panel teks besar (teks padat)
             elif eff_style in ("doodle", "doodle_top"):
                 base = graded; theme = pick_theme(graded, forced_theme)  # doodle idealnya pakai [img]
                 full_img = film_grade(im)                                # foto utuh -> crop editable di Figma
@@ -3042,6 +3079,8 @@ def process_page(page, workdir, mem=None, revision=None):
         # posisi teks (zone) sesuai gaya
         if eff_style == "card" and not is_custom:
             zone = "card"
+        elif eff_style == "panel" and not is_custom:
+            zone = "panel"
         elif eff_style == "doodle_top":
             zone = "top"
         elif i == 1:
