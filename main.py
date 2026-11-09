@@ -794,6 +794,7 @@ def auto_concept(text):
 
 _CONCEPTS_OK = {"dark", "panel", "card"}
 _ZONES_OK = {"top", "bottom", "left", "right", "center"}
+_OVERLAY_MULT = {"low": 0.85, "medium": 1.1, "high": 1.6}   # pilihan overlay Luna -> pengali kegelapan
 def luna_layout_plan(texts):
     """Fase 4: minta AI (Luna) tentukan POSISI teks (zone) tiap slide, 1 carousel sekaligus.
     Konsep tetap full-bleed 'dark' (panel/card HANYA kalau user minta eksplisit).
@@ -803,12 +804,14 @@ def luna_layout_plan(texts):
     numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(texts))
     prompt = (
         "Kamu layout director carousel Instagram brand konseling pernikahan & keislaman.\n"
-        "Semua slide pakai foto full-bleed + teks di atasnya. Tentukan POSISI teks tiap slide: "
-        "salah satu dari top / bottom / left / right / center, taruh di area yang paling enak & kebaca.\n"
-        "Jaga carousel tetap NYATU tapi JANGAN semua slide sama persis (variasikan posisi biar nggak monoton). "
-        "Slide 1 (cover) biasanya 'bottom'.\n"
+        "Semua slide pakai foto full-bleed + teks di atasnya. Untuk TIAP slide tentukan:\n"
+        "- zone: posisi teks -> top / bottom / left / right / center, taruh di area paling enak & kebaca.\n"
+        "- overlay: seberapa gelap lapisan di atas foto -> low / medium / high "
+        "(foto terang atau mood serius -> high; foto sudah gelap / ringan -> low/medium).\n"
+        "Jaga carousel NYATU tapi JANGAN semua slide sama persis (variasikan biar nggak monoton). "
+        "Slide 1 (cover) biasanya zone 'bottom'.\n"
         f"Daftar slide:\n{numbered}\n\n"
-        'Balas HANYA JSON: {"slides":[{"zone":"..."}, ...]} dengan panjang PERSIS sama jumlah slide.')
+        'Balas HANYA JSON: {"slides":[{"zone":"...","overlay":"..."}, ...]} panjang PERSIS = jumlah slide.')
     data = ai_json(prompt)
     if not isinstance(data, dict):
         return None
@@ -820,7 +823,13 @@ def luna_layout_plan(texts):
         if not isinstance(item, dict):
             out.append(None); continue
         z = str(item.get("zone", "")).lower().strip()
-        out.append({"zone": z} if z in _ZONES_OK else None)
+        ov = str(item.get("overlay", "")).lower().strip()
+        spec = {}
+        if z in _ZONES_OK:
+            spec["zone"] = z
+        if ov in _OVERLAY_MULT:
+            spec["overlay"] = ov
+        out.append(spec or None)
     return out
 
 def make_placeholder():
@@ -3161,6 +3170,11 @@ def process_page(page, workdir, mem=None, revision=None):
         img_path = os.path.join(workdir, f"slide_{i}.png")
         # penjaga keterbacaan: foto terang -> overlay ditebelin otomatis (foto gelap dibiarin)
         scrim_boost = readability_boost(base, zone) if theme == "dark" else 1.0
+        if theme == "dark":
+            _lp = luna_plan[i - 1] if (luna_plan and (i - 1) < len(luna_plan)) else None
+            if _lp and _lp.get("overlay") in _OVERLAY_MULT:
+                # Luna atur overlay, tapi nggak boleh lebih terang dari batas kebaca (floor keterbacaan)
+                scrim_boost = max(scrim_boost, _OVERLAY_MULT[_lp["overlay"]])
         if theme == "dark":
             bake_scrim(base, zone, img_path, scrim_boost)   # overlay gelap (gaya gelap/duotone)
         else:                                               # card / light -> tanpa overlay gelap
