@@ -381,6 +381,7 @@ def rich_segments(text):
 STYLE_MAP = {
     "1": "dark", "foto gelap": "dark", "gelap": "dark",
     "2": "card", "kartu putih": "card", "kartu": "card", "putih": "card",
+    "panel": "panel", "foto panel": "panel", "teks panel": "panel",
     "3": "duotone", "tosca duotone": "duotone", "duotone": "duotone", "tosca": "duotone",
     "4": "stabilo", "foto stabilo": "stabilo", "stabilo": "stabilo",
     "5": "doodle", "doodle terang": "doodle", "doodle": "doodle",
@@ -794,21 +795,20 @@ def auto_concept(text):
 _CONCEPTS_OK = {"dark", "panel", "card"}
 _ZONES_OK = {"top", "bottom", "left", "right", "center"}
 def luna_layout_plan(texts):
-    """Fase 4: minta AI (Luna) RANCANG layout 1 carousel sekaligus -> concept + zone tiap slide.
-    Balikin list [{concept, zone} | None] panjang = len(texts), atau None kalau AI gagal/mati."""
+    """Fase 4: minta AI (Luna) tentukan POSISI teks (zone) tiap slide, 1 carousel sekaligus.
+    Konsep tetap full-bleed 'dark' (panel/card HANYA kalau user minta eksplisit).
+    Balikin list [{zone} | None] panjang = len(texts), atau None kalau AI gagal/mati."""
     if not texts:
         return None
     numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(texts))
     prompt = (
         "Kamu layout director carousel Instagram brand konseling pernikahan & keislaman.\n"
-        "Untuk TIAP slide, pilih:\n"
-        "- concept: 'dark' (foto full + teks di atasnya), 'panel' (foto band atas + panel teks besar, buat TEKS PADAT), "
-        "atau 'card' (foto atas + kartu teks bawah).\n"
-        "- zone (hanya dipakai kalau concept 'dark'): posisi teks top/bottom/left/right/center, taruh di area yang paling enak.\n"
-        "Aturan: teks PADAT -> 'panel'. Jaga carousel tetap NYATU tapi JANGAN semua slide sama persis "
-        "(variasikan biar nggak monoton). Slide 1 (cover) biasanya 'dark' + 'bottom'.\n"
+        "Semua slide pakai foto full-bleed + teks di atasnya. Tentukan POSISI teks tiap slide: "
+        "salah satu dari top / bottom / left / right / center, taruh di area yang paling enak & kebaca.\n"
+        "Jaga carousel tetap NYATU tapi JANGAN semua slide sama persis (variasikan posisi biar nggak monoton). "
+        "Slide 1 (cover) biasanya 'bottom'.\n"
         f"Daftar slide:\n{numbered}\n\n"
-        'Balas HANYA JSON: {"slides":[{"concept":"...","zone":"..."}, ...]} dengan panjang PERSIS sama jumlah slide.')
+        'Balas HANYA JSON: {"slides":[{"zone":"..."}, ...]} dengan panjang PERSIS sama jumlah slide.')
     data = ai_json(prompt)
     if not isinstance(data, dict):
         return None
@@ -819,11 +819,8 @@ def luna_layout_plan(texts):
     for item in arr:
         if not isinstance(item, dict):
             out.append(None); continue
-        c = str(item.get("concept", "")).lower().strip()
         z = str(item.get("zone", "")).lower().strip()
-        c = c if c in _CONCEPTS_OK else None
-        z = z if z in _ZONES_OK else None
-        out.append({"concept": c, "zone": z} if c else None)
+        out.append({"zone": z} if z in _ZONES_OK else None)
     return out
 
 def make_placeholder():
@@ -3045,11 +3042,7 @@ def process_page(page, workdir, mem=None, revision=None):
         elif i == 1:
             eff_style = content_style
         elif CONCEPT_AUTO and not wants_custom:
-            _lp = luna_plan[i - 1] if (luna_plan and (i - 1) < len(luna_plan)) else None
-            if _lp and _lp.get("concept"):
-                eff_style = _lp["concept"]              # Luna yang ngarang konsep
-            else:
-                eff_style = auto_concept(clean_block)   # fallback aturan (Luna mati/ngaco)
+            eff_style = "dark"   # AUTO: selalu full-bleed. panel/card HANYA kalau user minta (penanda gaya)
         else:
             eff_style = "dark"
 
