@@ -59,6 +59,7 @@ try:
     VEIL_OPACITY = float(os.environ.get("VEIL_OPACITY") or "0.50")   # opacity lapisan hitam RATA di atas foto (0..0.68)
 except Exception:
     VEIL_OPACITY = 0.50
+VISION_LUNA   = (os.environ.get("VISION_LUNA") or "true").lower() == "true"   # mata Luna: lihat foto utk posisi teks & overlay (Skenario B)
 try:
     CONCEPT_DENSE_CHARS = int(os.environ.get("CONCEPT_DENSE_CHARS") or "150")  # >= sekian huruf dianggap 'teks padat' -> konsep panel
 except Exception:
@@ -2234,6 +2235,58 @@ def _openai_json(prompt):
     except Exception as e:
         print("    ! OpenAI gagal:", e); return None
 
+def _openai_vision_json(prompt, img_bytes):
+    """OpenAI vision: kirim gambar + prompt ke Luna -> JSON. None kalau gagal/mati."""
+    if not OPENAI_API_KEY:
+        return None
+    try:
+        b64 = base64.b64encode(img_bytes).decode()
+        r = requests.post(f"{OPENAI_BASE}/chat/completions",
+                          headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                          json={"model": OPENAI_MODEL,
+                                "messages": [{"role": "user", "content": [
+                                    {"type": "text", "text": prompt + "\n\nJawab HANYA JSON valid, tanpa teks lain."},
+                                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                                ]}]},
+                          timeout=90)
+        if r.status_code != 200:
+            print(f"    ! OpenAI vision {r.status_code}: {r.text[:140]}")
+            return None
+        return _json_from_text(r.json()["choices"][0]["message"]["content"])
+    except Exception as e:
+        print("    ! OpenAI vision gagal:", e); return None
+
+def luna_vision_spec(im, text):
+    """MATA LUNA: Luna LIHAT foto + baca teks -> posisi teks (zone) & overlay. None kalau off/gagal."""
+    if not (VISION_LUNA and OPENAI_API_KEY):
+        return None
+    try:
+        buf = io.BytesIO()
+        im.convert("RGB").resize((512, 640)).save(buf, "JPEG", quality=80)   # kecilin -> hemat token
+        img_bytes = buf.getvalue()
+    except Exception:
+        return None
+    prompt = (
+        "Kamu layout director. LIHAT foto ini. Teks PUTIH akan ditaruh di atas foto.\n"
+        f"Teks: {(text or '')[:200]}\n"
+        "Tentukan:\n"
+        "- zone: area paling KOSONG & tenang buat teks, HINDARI wajah/objek utama -> "
+        "top / bottom / left / right / center.\n"
+        "- overlay: seberapa gelap lapisan hitam di atas foto biar teks kebaca -> low / medium / high "
+        "(foto terang -> high).\n"
+        'Balas HANYA JSON: {"zone":"...","overlay":"..."}')
+    data = _openai_vision_json(prompt, img_bytes)
+    if not isinstance(data, dict):
+        return None
+    z = str(data.get("zone", "")).lower().strip()
+    ov = str(data.get("overlay", "")).lower().strip()
+    spec = {}
+    if z in _ZONES_OK:
+        spec["zone"] = z
+    if ov in _OVERLAY_MULT:
+        spec["overlay"] = ov
+    return spec or None
+
 # Urutan otak: 'openai' (Luna utama) -> gratis cadangan. Bisa diubah via AI_PRIMARY.
 AI_PRIMARY = (os.environ.get("AI_PRIMARY") or "openai").lower()   # 'openai' / 'groq' / 'gemini'
 
@@ -3003,24 +3056,6 @@ def process_page(page, workdir, mem=None, revision=None):
             return u
         return None
 
-    # --- Fase 4: Luna rancang layout 1 carousel sekaligus (concept+zone tiap slide) ---
-    luna_plan = None
-    if CONCEPT_AUTO and AI_CHAT_ENABLED:
-        try:
-            _lt = []
-            for _b in slide_blocks:
-                if is_cta_block(_b):
-                    _lt.append("[slide CTA]")
-                else:
-                    _cb, _, _, _ = extract_custom_image(_b)
-                    _cb, _ = extract_gaya(_cb)
-                    _lt.append(re.sub(r"\s+", " ", _cb).strip()[:220])
-            luna_plan = luna_layout_plan(_lt)
-            if luna_plan:
-                print("  [Luna rancang layout carousel: OK]")
-        except Exception as _le:
-            print("  ! Luna layout plan gagal, pakai aturan:", _le); luna_plan = None
-
     for i, block in enumerate(slide_blocks, start=1):
         # --- SLIDE CTA khusus ---
         if is_cta_block(block):
@@ -3132,6 +3167,7 @@ def process_page(page, workdir, mem=None, revision=None):
                 full_img = film_grade(im)                                # foto utuh -> crop editable di Figma
 
         # posisi teks (zone) sesuai gaya
+        vspec = None
         if eff_style == "card" and not is_custom:
             zone = "card"
         elif eff_style == "panel" and not is_custom:
@@ -3141,9 +3177,12 @@ def process_page(page, workdir, mem=None, revision=None):
         elif i == 1:
             zone = "bottom"                 # cover default: teks bawah
         else:
-            # posisi teks = area paling KOSONG di foto (detektor lokal yg LIAT foto langsung).
-            # Luna nggak dipakai utk zone krn dia nggak liat foto -> penempatan buta.
-            zone = analyze_zone(base)
+            # MATA LUNA: Luna LIHAT fotonya -> taruh teks di ruang kosong, hindari wajah/objek.
+            vspec = luna_vision_spec(base, (headline + " " + body)) if theme == "dark" else None
+            if vspec and vspec.get("zone"):
+                zone = vspec["zone"]
+            else:
+                zone = analyze_zone(base)   # fallback: detektor lokal (Luna/vision mati)
 
         clean_path = os.path.join(workdir, f"clean_{i}.png")
         base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
@@ -3164,8 +3203,7 @@ def process_page(page, workdir, mem=None, revision=None):
         img_path = os.path.join(workdir, f"slide_{i}.png")
         # VEIL: lapisan hitam RATA di atas foto. Luna atur gelap-terangnya + floor keterbacaan.
         if theme == "dark":
-            _lp = luna_plan[i - 1] if (luna_plan and (i - 1) < len(luna_plan)) else None
-            _ov = _lp.get("overlay") if _lp else None
+            _ov = vspec.get("overlay") if vspec else None   # overlay dari MATA Luna (kalau ada)
             veil = veil_for(base, _ov)
             bake_scrim(base, zone, img_path, veil)
         else:                                               # card / light -> tanpa veil
