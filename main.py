@@ -56,6 +56,10 @@ STABILO_TXT   = (os.environ.get("STABILO_TXT")   or "16242B").lstrip("#")  # war
 DECOR_ACCENT  = (os.environ.get("DECOR_ACCENT") or "false").lower() == "true"  # garis aksen dekoratif kecil di atas judul (default MATI)
 CONCEPT_AUTO  = (os.environ.get("CONCEPT_AUTO") or "true").lower() == "true"   # pilih konsep per-slide otomatis (teks padat -> panel, anti-monoton)
 try:
+    VEIL_OPACITY = float(os.environ.get("VEIL_OPACITY") or "0.50")   # opacity lapisan hitam RATA di atas foto (0..0.68)
+except Exception:
+    VEIL_OPACITY = 0.50
+try:
     CONCEPT_DENSE_CHARS = int(os.environ.get("CONCEPT_DENSE_CHARS") or "150")  # >= sekian huruf dianggap 'teks padat' -> konsep panel
 except Exception:
     CONCEPT_DENSE_CHARS = 150
@@ -1134,6 +1138,17 @@ def readability_boost(im, zone):
     extra = _clamp((lum - 110.0) / 125.0, 0.0, 1.0) * 0.6
     return round(1.0 + extra, 3)
 
+def veil_for(im, luna_overlay=None):
+    """Opacity VEIL (lapisan hitam rata) di atas foto. Luna boleh atur (low/medium/high),
+    tapi ada FLOOR keterbacaan: foto makin terang -> veil minimal makin tinggi. Hasil 0..0.68."""
+    try:
+        lum = ImageStat.Stat(im.convert("L")).mean[0]
+    except Exception:
+        lum = 128.0
+    floor = 0.38 + _clamp((lum - 90.0) / 140.0, 0.0, 1.0) * 0.27   # 0.38 (gelap) .. 0.65 (terang)
+    want = {"low": 0.40, "medium": 0.50, "high": 0.62}.get(luna_overlay, VEIL_OPACITY)
+    return round(_clamp(max(want, floor), 0.0, 0.68), 3)
+
 
 # ---------- layout teks per zona (dipakai pptx & svg) ----------
 ZONE_LAYOUT = {
@@ -1278,35 +1293,16 @@ def _mask_h(stops):
         px[x, 0] = int(max(0, min(255, _interp(stops, x / (CANVAS_W - 1)))))
     return row.resize((CANVAS_W, CANVAS_H))
 
-def bake_scrim(im, zone, out_path, boost=1.0):
-    """
-    Gelapkan area teks dengan masking HALUS (smoothstep + blur), jadi nggak
-    ada garis potong. Untuk zona samping (kiri/kanan), gelapnya memudar juga
-    di atas & bawah supaya nggak kelihatan 'kepotong'.
-    """
+def bake_scrim(im, zone, out_path, veil=0.42):
+    """VEIL: satu lapisan hitam RATA menutupi SELURUH foto (opacity=veil), biar foto meredup
+    merata & teks kebaca di mana aja (bukan gradasi). + strip tipis atas/bawah utk logo/footer."""
     W, H = CANVAS_W, CANVAS_H
-
     def _px(stops): return [(o, int(round(op * 255))) for o, op in stops]
-
-    # feather vertikal buat zona samping: habis mulus di tepi atas & bawah
-    vfeather = _mask_v([(0.0, 0), (0.17, 255), (0.83, 255), (1.0, 0)])
-
-    # pakai ketebalan + knob yg sama dgn versi HTML/SVG (_scrim_scaled) + boost keterbacaan
-    st = _scrim_scaled(SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"]), boost)
-    if zone in ("left", "right"):
-        mask = ImageChops.multiply(_mask_h(_px(st)), vfeather)
-    else:  # top / bottom / center -> gradasi vertikal mulus
-        mask = _mask_v(_px(st))
-
-    # strip tipis atas (logo & tagline) + bawah (footer & tombol) SELALU ada,
-    # tapi juga mulus (eased) -> digabung pakai 'lighter' (ambil yang tergelap)
-    top_strip = _mask_v(_px(_scrim_scaled([(o * 0.16, op) for o, op in SCRIM_STRIP_TOP] + [(1.0, 0.0)])))
-    bot_strip = _mask_v(_px(_scrim_scaled([(0.0, 0.0)] + [(0.86 + o * 0.14, op) for o, op in SCRIM_STRIP_BOT])))
+    lvl = int(round(_clamp(veil, 0.0, 0.85) * 255))
+    mask = Image.new("L", (W, H), lvl)                        # veil RATA seluruh kanvas
+    top_strip = _mask_v(_px([(o * 0.16, op) for o, op in SCRIM_STRIP_TOP] + [(1.0, 0.0)]))
+    bot_strip = _mask_v(_px([(0.0, 0.0)] + [(0.86 + o * 0.14, op) for o, op in SCRIM_STRIP_BOT]))
     mask = ImageChops.lighter(ImageChops.lighter(mask, top_strip), bot_strip)
-
-    # blur -> perhalus lagi, hilangkan sisa banding (dinaikin biar gradasi makin mulus)
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(22, W // 30)))
-
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 255))
     overlay.putalpha(mask)
     Image.alpha_composite(im.convert("RGBA"), overlay).convert("RGB").save(out_path, "PNG")
@@ -1685,20 +1681,13 @@ def _grad_rad(gid, cx, stops):
     s = "".join(f'<stop offset="{o}" stop-color="#000000" stop-opacity="{op}"/>' for o, op in stops)
     return f'<radialGradient id="{gid}" cx="{cx}" cy="0.5" r="0.8">{s}</radialGradient>'
 
-def _scrim_svg(zone, xo, idx, boost=1.0):
-    """Kembalikan (defs, rects) berisi gradasi gelap sebagai elemen vektor."""
+def _scrim_svg(zone, xo, idx, veil=0.42):
+    """VEIL: satu rect hitam RATA menutupi seluruh foto (opacity=veil) + strip tipis atas/bawah."""
     W, H = CANVAS_W, CANVAS_H
     gid = f"sc{idx}"
     defs, rects = [], []
-    # gradasi utama sesuai zona (mulus/eased, dikali knob G_SCRIM + boost keterbacaan)
-    st = _scrim_scaled(SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"]), boost)
-    if zone == "center":
-        defs.append(_grad_rad(gid, 0.5, st))
-    elif zone in ("left", "right"):
-        defs.append(_grad_lin(gid, False, st))
-    else:  # top / bottom
-        defs.append(_grad_lin(gid, True, st))
-    rects.append(f'<rect x="{xo}" y="0" width="{W}" height="{H}" fill="url(#{gid})"/>')
+    v = round(_clamp(veil, 0.0, 0.85), 3)
+    rects.append(f'<rect x="{xo}" y="0" width="{W}" height="{H}" fill="#000000" fill-opacity="{v}"/>')  # veil RATA
     # strip tipis atas (logo/tagline) & bawah (footer/tombol) — tetap editable
     defs.append(_grad_lin(gid + "t", True, SCRIM_STRIP_TOP))
     defs.append(_grad_lin(gid + "b", True, SCRIM_STRIP_BOT))
@@ -1746,7 +1735,7 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
                      f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(photo)}"/>')
         # masking vektor cuma utk slide gelap/duotone
         if s.get("kind") != "cta" and scrim_on:
-            d, r = _scrim_svg(s.get("zone", "bottom"), xo, idx, s.get("scrim_boost", 1.0))
+            d, r = _scrim_svg(s.get("zone", "bottom"), xo, idx, s.get("veil", VEIL_OPACITY))
             defs_all.append(d); parts.append(r)
         # logo: versi gelap kalau tema terang (kalau ada)
         use_logo = logo_dark_uri if (dark_logo and logo_dark_uri) else logo_uri
@@ -1835,19 +1824,13 @@ def _html_rich(text):
         lines.append(frag)
     return "<br>".join(lines)
 
-def _html_scrim(zone, boost=1.0):
-    """Overlay gelap (masking) sebagai div CSS TERPISAH dari foto -> editable sendiri di Figma.
-    Gradasi disamain sama versi SVG per-zona + strip atas (logo/tagline) & bawah (footer/CTA)."""
+def _html_scrim(zone, veil=0.42):
+    """VEIL: satu div hitam RATA menutupi seluruh foto (opacity=veil) + strip tipis atas/bawah.
+    Tetap div CSS terpisah -> editable sendiri di Figma."""
     H = CANVAS_H
-    st = _scrim_scaled(SCRIM_STOPS.get(zone, SCRIM_STOPS["bottom"]), boost)
-    if zone == "center":
-        main = f"radial-gradient(ellipse 80% 80% at 50% 50%, {_css_stops(st)})"
-    elif zone in ("left", "right"):
-        main = f"linear-gradient(to right, {_css_stops(st)})"
-    else:  # top / bottom
-        main = f"linear-gradient(to bottom, {_css_stops(st)})"
+    v = round(_clamp(veil, 0.0, 0.85), 3)
     return (
-        f'<div class="ov" style="background:{main}"></div>'
+        f'<div class="ov" style="background:rgba(0,0,0,{v})"></div>'
         f'<div class="ov" style="height:{int(0.16*H)}px;background:linear-gradient(to bottom, {_css_stops(SCRIM_STRIP_TOP)})"></div>'
         f'<div class="ov" style="top:{int(0.86*H)}px;height:{int(0.14*H)}px;background:linear-gradient(to bottom, {_css_stops(SCRIM_STRIP_BOT)})"></div>'
     )
@@ -1946,11 +1929,11 @@ body{{background:#444;}}
                 st = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 50%;"
             parts.append(f'<img src="{_img_data_uri(full_p)}" style="{st}">')
             if theme == "dark" and s.get("kind") != "cta":
-                parts.append(_html_scrim(s.get("zone", "bottom"), s.get("scrim_boost", 1.0)))
+                parts.append(_html_scrim(s.get("zone", "bottom"), s.get("veil", VEIL_OPACITY)))
         elif bgp:
             parts.append(f'<img class="bg" src="{_img_data_uri(bgp)}">')
             if theme == "dark" and s.get("kind") != "cta":
-                parts.append(_html_scrim(s.get("zone", "bottom"), s.get("scrim_boost", 1.0)))
+                parts.append(_html_scrim(s.get("zone", "bottom"), s.get("veil", VEIL_OPACITY)))
         use_logo = logo_dark_uri if (theme == "light" and logo_dark_uri) else logo_uri
         if use_logo:
             parts.append(f'<img class="logo" src="{use_logo}">')
@@ -3168,23 +3151,21 @@ def process_page(page, workdir, mem=None, revision=None):
         except Exception as _ce:
             print("    ! gagal simpan cache slide:", _ce)
         img_path = os.path.join(workdir, f"slide_{i}.png")
-        # penjaga keterbacaan: foto terang -> overlay ditebelin otomatis (foto gelap dibiarin)
-        scrim_boost = readability_boost(base, zone) if theme == "dark" else 1.0
+        # VEIL: lapisan hitam RATA di atas foto. Luna atur gelap-terangnya + floor keterbacaan.
         if theme == "dark":
             _lp = luna_plan[i - 1] if (luna_plan and (i - 1) < len(luna_plan)) else None
-            if _lp and _lp.get("overlay") in _OVERLAY_MULT:
-                # Luna atur overlay, tapi nggak boleh lebih terang dari batas kebaca (floor keterbacaan)
-                scrim_boost = max(scrim_boost, _OVERLAY_MULT[_lp["overlay"]])
-        if theme == "dark":
-            bake_scrim(base, zone, img_path, scrim_boost)   # overlay gelap (gaya gelap/duotone)
-        else:                                               # card / light -> tanpa overlay gelap
+            _ov = _lp.get("overlay") if _lp else None
+            veil = veil_for(base, _ov)
+            bake_scrim(base, zone, img_path, veil)
+        else:                                               # card / light -> tanpa veil
+            veil = 0.0
             base.save(img_path, "PNG")
         preview_paths.append(img_path)
         slides_data.append({"kind": "normal", "headline": headline, "body": body,
                             "image_path": img_path, "clean_path": clean_path,
                             "full_path": full_path, "crop_rect": crop_rect,
                             "index": i, "total": total, "zone": zone,
-                            "scrim_boost": scrim_boost,
+                            "veil": veil,
                             "theme": theme, "style": eff_style})
 
         # --- #2 CEK MANDIRI (AI vision) — CUKUP slide COVER biar hemat kuota gratis Gemini ---
