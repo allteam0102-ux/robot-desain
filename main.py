@@ -492,7 +492,7 @@ def _unsplash_collection_random(used_ids):
     return None, None
 
 def unsplash_pick_collection(query, used_ids):
-    """Cari foto RELEVAN di dalam collection user (keyword match); kalau nggak ada -> acak dari collection."""
+    """Cari foto RELEVAN & BELUM dipakai di collection user (keyword match); kalau nggak ada -> None (lanjut global)."""
     try:
         r = requests.get("https://api.unsplash.com/search/photos",
                          headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
@@ -501,7 +501,7 @@ def unsplash_pick_collection(query, used_ids):
                                  "collections": UNSPLASH_COLLECTIONS}, timeout=60)
         if r.status_code == 200:
             results = r.json().get("results", [])
-            fresh = [p for p in results if str(p.get("id")) not in used_ids] or results
+            fresh = [p for p in results if str(p.get("id")) not in used_ids]
             if fresh:
                 photo = random.choice(fresh[:8])
                 if photo.get("id"): used_ids.add(str(photo["id"]))
@@ -665,6 +665,8 @@ def image_pick(query, used_ids):
         return None, None
     # 2) UMUM: GABUNG kandidat Unsplash + Pexels jadi satu, baru pilih acak.
     #    Jadi nggak maksa Unsplash — kalau Unsplash kurang nyambung, Pexels tetap dapet giliran.
+    #    PRIORITAS foto yg BELUM dipakai (anti-kembar); foto lama cuma last-resort biar nggak placeholder.
+    reuse_pool = []
     for q in [query] + FALLBACK_QUERIES:
         cands = []
         if UNSPLASH_ACCESS_KEY:
@@ -679,7 +681,8 @@ def image_pick(query, used_ids):
                 print(f"    ! pexels cari gagal ('{_short_q(q)}'): {e}")
         if not cands:
             continue
-        fresh = [c for c in cands if str(c["id"]) not in used_ids] or cands
+        reuse_pool += cands
+        fresh = [c for c in cands if str(c["id"]) not in used_ids]
         random.shuffle(fresh)            # Unsplash & Pexels tercampur -> peluang adil
         for c in fresh[:12]:
             try:
@@ -689,6 +692,16 @@ def image_pick(query, used_ids):
                 return d, c["credit"]
             except Exception:
                 continue
+    # last resort: nggak ada foto BARU sama sekali -> baru boleh pakai ulang (daripada placeholder)
+    random.shuffle(reuse_pool)
+    for c in reuse_pool[:12]:
+        try:
+            d = requests.get(c["url"], timeout=60).content
+            Image.open(io.BytesIO(d)).verify()
+            used_ids.add(str(c["id"]))
+            return d, c["credit"]
+        except Exception:
+            continue
     return None, None
 
 # ---------- FITUR: BAWA GAMBAR SENDIRI (mis. hasil doodle Gemini) ----------
@@ -3128,11 +3141,9 @@ def process_page(page, workdir, mem=None, revision=None):
         elif i == 1:
             zone = "bottom"                 # cover default: teks bawah
         else:
-            _lp = luna_plan[i - 1] if (luna_plan and (i - 1) < len(luna_plan)) else None
-            if _lp and _lp.get("zone"):
-                zone = _lp["zone"]          # Luna milih posisi teks
-            else:
-                zone = analyze_zone(base)   # fallback: area paling kosong
+            # posisi teks = area paling KOSONG di foto (detektor lokal yg LIAT foto langsung).
+            # Luna nggak dipakai utk zone krn dia nggak liat foto -> penempatan buta.
+            zone = analyze_zone(base)
 
         clean_path = os.path.join(workdir, f"clean_{i}.png")
         base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
