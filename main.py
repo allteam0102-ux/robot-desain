@@ -1122,6 +1122,18 @@ def analyze_zone(im):
         "right":  sc([busy[0][2], busy[1][2], busy[2][2]], [lum[0][2], lum[1][2], lum[2][2]]),
         "center": sc([busy[1][1]], [lum[1][1]]),
     }
+    # HINDARI teks nabrak WAJAH/ORANG: penalti BESAR kalau area teks ketimpa subjek
+    # (wajah mulus = detail rendah -> tanpa ini malah dikira 'kosong' & ketimpa).
+    subj = _face_box(im) or _person_box(im)
+    if subj:
+        bx0, by0, bw, bh = subj
+        def _ov(region):
+            ax0, ay0, aw, ah = region
+            ix = max(0.0, min(ax0 + aw, bx0 + bw) - max(ax0, bx0))
+            iy = max(0.0, min(ay0 + ah, by0 + bh) - max(ay0, by0))
+            return (ix * iy) / max(1e-6, aw * ah)
+        for z in ("top", "bottom", "left", "right", "center"):
+            score[z] += _ov(_ZONE_TEXT_REGION[z]) * 60.0
     # sedikit condong ke atas/bawah (lebih rapi); kiri/kanan/tengah dipakai kalau jelas lebih kosong
     for z in ("left", "right", "center"):
         score[z] += 3.0
@@ -2267,25 +2279,15 @@ def luna_vision_spec(im, text):
     except Exception:
         return None
     prompt = (
-        "Kamu layout director. LIHAT foto ini. Teks PUTIH akan ditaruh di atas foto.\n"
-        f"Teks: {(text or '')[:200]}\n"
-        "Tentukan:\n"
-        "- zone: area paling KOSONG & tenang buat teks, HINDARI wajah/objek utama -> "
-        "top / bottom / left / right / center.\n"
-        "- overlay: seberapa gelap lapisan hitam di atas foto biar teks kebaca -> low / medium / high "
-        "(foto terang -> high).\n"
-        'Balas HANYA JSON: {"zone":"...","overlay":"..."}')
+        "Kamu layout director. LIHAT foto ini (teks putih akan ditaruh di atasnya).\n"
+        "Tentukan overlay: seberapa gelap lapisan hitam di atas foto biar teks kebaca & bermood -> "
+        "low / medium / high (foto terang atau mood serius -> high; foto sudah gelap -> low/medium).\n"
+        'Balas HANYA JSON: {"overlay":"..."}')
     data = _openai_vision_json(prompt, img_bytes)
     if not isinstance(data, dict):
         return None
-    z = str(data.get("zone", "")).lower().strip()
     ov = str(data.get("overlay", "")).lower().strip()
-    spec = {}
-    if z in _ZONES_OK:
-        spec["zone"] = z
-    if ov in _OVERLAY_MULT:
-        spec["overlay"] = ov
-    return spec or None
+    return {"overlay": ov} if ov in _OVERLAY_MULT else None
 
 # Urutan otak: 'openai' (Luna utama) -> gratis cadangan. Bisa diubah via AI_PRIMARY.
 AI_PRIMARY = (os.environ.get("AI_PRIMARY") or "openai").lower()   # 'openai' / 'groq' / 'gemini'
@@ -3177,12 +3179,10 @@ def process_page(page, workdir, mem=None, revision=None):
         elif i == 1:
             zone = "bottom"                 # cover default: teks bawah
         else:
-            # MATA LUNA: Luna LIHAT fotonya -> taruh teks di ruang kosong, hindari wajah/objek.
+            # PENEMPATAN: detektor lokal person-aware (deteksi wajah/orang -> hindari) = paling andal.
+            # Luna (vision) tetap LIHAT foto, tapi buat nentuin OVERLAY/mood, bukan posisi.
             vspec = luna_vision_spec(base, (headline + " " + body)) if theme == "dark" else None
-            if vspec and vspec.get("zone"):
-                zone = vspec["zone"]
-            else:
-                zone = analyze_zone(base)   # fallback: detektor lokal (Luna/vision mati)
+            zone = analyze_zone(base)
 
         clean_path = os.path.join(workdir, f"clean_{i}.png")
         base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
