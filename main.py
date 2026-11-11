@@ -1101,9 +1101,10 @@ def _zone_stats(gray, box):
     except Exception:
         return 999.0, 128.0
 
-def analyze_zone(im):
+def analyze_zone(im, avoid_extra=None):
     """Pilih area teks di bagian paling 'kosong' (detail rendah) DAN tidak terlalu
-    terang (biar teks putih tetap kebaca). Skor = detail + penalti area terang."""
+    terang (biar teks putih tetap kebaca), DAN jauh dari wajah/orang. avoid_extra =
+    kotak (x0,y0,x1,y1) posisi orang dari Luna (opsional)."""
     g = im.convert("L")
     W, H = CANVAS_W, CANVAS_H
     xs = [0, W // 3, 2 * W // 3, W]
@@ -1122,18 +1123,17 @@ def analyze_zone(im):
         "right":  sc([busy[0][2], busy[1][2], busy[2][2]], [lum[0][2], lum[1][2], lum[2][2]]),
         "center": sc([busy[1][1]], [lum[1][1]]),
     }
-    # HINDARI teks nabrak WAJAH/ORANG: penalti BESAR kalau area teks ketimpa subjek
-    # (wajah mulus = detail rendah -> tanpa ini malah dikira 'kosong' & ketimpa).
-    subj = _face_box(im) or _person_box(im)
-    if subj:
-        bx0, by0, bw, bh = subj
-        def _ov(region):
-            ax0, ay0, aw, ah = region
-            ix = max(0.0, min(ax0 + aw, bx0 + bw) - max(ax0, bx0))
-            iy = max(0.0, min(ay0 + ah, by0 + bh) - max(ay0, by0))
-            return (ix * iy) / max(1e-6, aw * ah)
+    # HINDARI teks nabrak WAJAH/ORANG: penalti BESAR kalau area teks ketimpa subjek.
+    # Sumber subjek: deteksi lokal (gratis) + posisi dari MATA Luna (andal di pose susah).
+    subjects = []
+    _s = _face_box(im) or _person_box(im)
+    if _s:
+        subjects.append(_xywh_to_xyxy(_s))
+    if avoid_extra:
+        subjects.append(avoid_extra)
+    if subjects:
         for z in ("top", "bottom", "left", "right", "center"):
-            score[z] += _ov(_ZONE_TEXT_REGION[z]) * 60.0
+            score[z] += max(_ov_box(_ZONE_TEXT_REGION[z], s) for s in subjects) * 60.0
     # sedikit condong ke atas/bawah (lebih rapi); kiri/kanan/tengah dipakai kalau jelas lebih kosong
     for z in ("left", "right", "center"):
         score[z] += 3.0
@@ -1148,6 +1148,26 @@ _ZONE_TEXT_REGION = {
     "center": (0.10, 0.34, 0.90, 0.82),
     "card":   (0.05, 0.60, 0.95, 0.92),
 }
+
+def _ov_box(a, b):
+    """Fraksi area 'a' (region teks) yang ketimpa 'b' (subjek). Keduanya (x0,y0,x1,y1) fraksi."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    iy = max(0.0, min(ay1, by1) - max(ay0, by0))
+    return (ix * iy) / max(1e-6, (ax1 - ax0) * (ay1 - ay0))
+
+def _xywh_to_xyxy(b):
+    x, y, w, h = b
+    return (x, y, x + w, y + h)
+
+_H_RANGE = {"left": (0.0, 0.48), "center": (0.26, 0.74), "right": (0.52, 1.0)}
+_V_RANGE = {"top": (0.0, 0.48), "middle": (0.26, 0.74), "bottom": (0.52, 1.0)}
+def _face_zone_box(fh, fv):
+    """Posisi wajah dari Luna (left/center/right x top/middle/bottom) -> kotak (x0,y0,x1,y1)."""
+    hx0, hx1 = _H_RANGE.get(fh, (0.0, 1.0))
+    vy0, vy1 = _V_RANGE.get(fv, (0.0, 1.0))
+    return (hx0, vy0, hx1, vy1)
 
 def readability_boost(im, zone):
     """Penjaga keterbacaan: ukur kecerahan area tempat teks duduk.
@@ -2280,14 +2300,26 @@ def luna_vision_spec(im, text):
         return None
     prompt = (
         "Kamu layout director. LIHAT foto ini (teks putih akan ditaruh di atasnya).\n"
-        "Tentukan overlay: seberapa gelap lapisan hitam di atas foto biar teks kebaca & bermood -> "
-        "low / medium / high (foto terang atau mood serius -> high; foto sudah gelap -> low/medium).\n"
-        'Balas HANYA JSON: {"overlay":"..."}')
+        "Jawab:\n"
+        "- face_h: posisi horizontal WAJAH/KEPALA orang utama -> left / center / right\n"
+        "- face_v: posisi vertikal wajah/kepala -> top / middle / bottom\n"
+        "- overlay: seberapa gelap lapisan hitam biar teks kebaca -> low / medium / high "
+        "(foto terang/ramai -> high)\n"
+        "Kalau NGGAK ada orang, isi face_h & face_v = 'none'.\n"
+        'Balas HANYA JSON: {"face_h":"...","face_v":"...","overlay":"..."}')
     data = _openai_vision_json(prompt, img_bytes)
     if not isinstance(data, dict):
         return None
+    out = {}
     ov = str(data.get("overlay", "")).lower().strip()
-    return {"overlay": ov} if ov in _OVERLAY_MULT else None
+    fh = str(data.get("face_h", "")).lower().strip()
+    fv = str(data.get("face_v", "")).lower().strip()
+    if ov in _OVERLAY_MULT:
+        out["overlay"] = ov
+    if fh in ("left", "center", "right") and fv in ("top", "middle", "bottom"):
+        out["face_h"] = fh
+        out["face_v"] = fv
+    return out or None
 
 # Urutan otak: 'openai' (Luna utama) -> gratis cadangan. Bisa diubah via AI_PRIMARY.
 AI_PRIMARY = (os.environ.get("AI_PRIMARY") or "openai").lower()   # 'openai' / 'groq' / 'gemini'
@@ -3179,10 +3211,11 @@ def process_page(page, workdir, mem=None, revision=None):
         elif i == 1:
             zone = "bottom"                 # cover default: teks bawah
         else:
-            # PENEMPATAN: detektor lokal person-aware (deteksi wajah/orang -> hindari) = paling andal.
-            # Luna (vision) tetap LIHAT foto, tapi buat nentuin OVERLAY/mood, bukan posisi.
+            # PENEMPATAN: Luna LIHAT foto -> tunjuk posisi orang (andal di pose susah),
+            # lalu zona teks dipilih JAUH dari orang (+ deteksi lokal sbg cadangan).
             vspec = luna_vision_spec(base, (headline + " " + body)) if theme == "dark" else None
-            zone = analyze_zone(base)
+            _avoid = _face_zone_box(vspec["face_h"], vspec["face_v"]) if (vspec and vspec.get("face_h")) else None
+            zone = analyze_zone(base, _avoid)
 
         clean_path = os.path.join(workdir, f"clean_{i}.png")
         base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
