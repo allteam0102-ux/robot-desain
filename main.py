@@ -1207,6 +1207,36 @@ ZONE_LAYOUT = {
     "panel":  dict(hx=0.07, hy=0.44,  hw=0.86, bx=0.07, by=0.55, bw=0.86, align="left"),
 }
 
+def _sanitize_box(box):
+    """Jaga kotak teks dari Luna tetap masuk akal (dalam margin, nggak kesempitan)."""
+    try:
+        x0, y0, x1, y1 = [float(v) for v in box]
+    except Exception:
+        return None
+    x0, x1 = min(x0, x1), max(x0, x1)
+    y0, y1 = min(y0, y1), max(y0, y1)
+    x0 = _clamp(x0, 0.04, 0.60); x1 = _clamp(x1, 0.40, 0.96)
+    y0 = _clamp(y0, 0.05, 0.70); y1 = _clamp(y1, 0.30, 0.93)
+    if x1 - x0 < 0.42:
+        c = (x0 + x1) / 2; x0 = _clamp(c - 0.21, 0.04, 0.54); x1 = _clamp(c + 0.21, 0.42, 0.96)
+    if y1 - y0 < 0.24:
+        y1 = _clamp(y0 + 0.30, 0.30, 0.93)
+    return (round(x0, 3), round(y0, 3), round(x1, 3), round(y1, 3))
+
+def _free_layout(box):
+    """Kotak bebas (x0,y0,x1,y1) dari Luna -> L (hx,hy,hw,bx,by,bw,align,bottom)."""
+    x0, y0, x1, y1 = box
+    hw = x1 - x0
+    return dict(hx=x0, hy=y0, hw=hw, bx=x0, by=y0 + 0.085, bw=hw, align="left", bottom=min(0.92, y1))
+
+def layout_of(s):
+    """L + batas bawah utk slide ini: pakai kotak bebas dari Luna kalau ada, else ZONE_LAYOUT[zone]."""
+    cl = s.get("layout")
+    if cl:
+        return cl, cl.get("bottom", 0.90)
+    z = s.get("zone", "bottom")
+    return ZONE_LAYOUT.get(z, ZONE_LAYOUT["bottom"]), 0.90
+
 # ---------- GRADASI OVERLAY: dibikin MULUS (banyak titik, kurva eased) ----------
 # Satu sumber dipakai bareng oleh PNG (bake_scrim), SVG, dan HTML biar seragam & halus.
 # Tiap titik = (posisi 0..1, kegelapan 0..1). Transisinya bertahap -> nggak ada garis patahan.
@@ -1241,7 +1271,7 @@ def head_px(zone, cover):  return max(16, int(round((66 if cover else 37) * G_HE
 def body_px(zone):         return max(14, int(round((31 if zone in ("left", "right") else 34) * G_BODY_SCALE)))
 
 def body_top(zone, cover):
-    L = ZONE_LAYOUT[zone]
+    L = ZONE_LAYOUT.get(zone, ZONE_LAYOUT["bottom"])
     return L["by"] if cover else (L["hy"] + 0.085)
 
 # ---------- AUTO-FIT: hitung ukuran & posisi teks biar NGGAK ketimpa & nggak keluar kanvas ----------
@@ -1277,11 +1307,13 @@ def _est_lines(text, width_px, font_px, bold):
 TEXT_HEAD_LH = 1.22
 TEXT_BODY_LH = 1.48
 
-def fit_text_layout(zone, cover, headline, body):
+def fit_text_layout(zone, cover, headline, body, L=None, bottom=None):
     """Kembalikan ukuran font & posisi (fraksi tinggi) judul+body yang DIJAMIN:
     - body selalu di BAWAH judul (nggak ketimpa)
-    - semua muat sebelum area footer/CTA (kalau kepanjangan, font otomatis diperkecil)."""
-    L = ZONE_LAYOUT.get(zone, ZONE_LAYOUT["bottom"])
+    - semua muat sebelum batas bawah (kalau kepanjangan, font otomatis diperkecil).
+    L & bottom opsional: utk PENEMPATAN BEBAS (kotak dari Luna)."""
+    if L is None:
+        L, _bottom = layout_of(s)
     W, H = CANVAS_W, CANVAS_H
     hw_px = L["hw"] * W
     bw_px = L["bw"] * W
@@ -1290,7 +1322,8 @@ def fit_text_layout(zone, cover, headline, body):
     HEAD_LH, BODY_LH, GAP = TEXT_HEAD_LH, TEXT_BODY_LH, 0.026
     top0 = L["hy"]
     body_min = L["by"] if cover else (L["hy"] + 0.085)
-    bottom = 0.90                      # batas bawah (di atas footer 0.925 / pill CTA 0.90)
+    if bottom is None:
+        bottom = 0.90                  # batas bawah (di atas footer 0.925 / pill CTA 0.90)
     for _ in range(24):
         hl = _est_lines(headline, hw_px, hpx, True)
         bl = _est_lines(body, bw_px, bpx, False)
@@ -1601,11 +1634,11 @@ def build_pptx(slides_data, out_path, logo_path, logo_dark_path=None):
 
         zone = s.get("zone", "bottom")
         cover = (s.get("index") == 1)
-        L = ZONE_LAYOUT.get(zone, ZONE_LAYOUT["bottom"])
+        L, _bottom = layout_of(s)
         al = _pp_align(L["align"])
         is_stabilo = (s.get("style") == "stabilo")
         head_color = STABILO_TXT if is_stabilo else body_txt
-        fit = fit_text_layout(zone, cover, s.get("headline", ""), s.get("body", ""))
+        fit = fit_text_layout(zone, cover, s.get("headline", ""), s.get("body", ""), L=L, bottom=_bottom)
         h_ratio = fit["head_px"] / max(1, head_px(zone, cover))
         b_ratio = fit["body_px"] / max(1, body_px(zone))
         if s["headline"]:
@@ -1806,7 +1839,7 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
 
         zone = s.get("zone", "bottom")
         cover = (s.get("index") == 1)
-        L = ZONE_LAYOUT.get(zone, ZONE_LAYOUT["bottom"])
+        L, _bottom = layout_of(s)
         if L["align"] == "center":
             anc = "middle"
             hx = xo + int((L["hx"] + L["hw"] / 2) * CANVAS_W)
@@ -1818,7 +1851,7 @@ def build_svg(slides_data, out_path, logo_path, logo_dark_path=None):
         is_stabilo = (s.get("style") == "stabilo")
         head_color = STABILO_TXT if is_stabilo else body_txt
         head_band  = STABILO_COLOR if is_stabilo else None
-        fit = fit_text_layout(zone, cover, s.get("headline", ""), s.get("body", ""))
+        fit = fit_text_layout(zone, cover, s.get("headline", ""), s.get("body", ""), L=L, bottom=_bottom)
         if s["headline"]:
             if DECOR_ACCENT and not is_stabilo:
                 _abx = (hx - 32) if anc == "middle" else hx
@@ -1994,10 +2027,10 @@ body{{background:#444;}}
             continue
 
         zone = s.get("zone", "bottom"); cover = (s.get("index") == 1)
-        L = ZONE_LAYOUT.get(zone, ZONE_LAYOUT["bottom"])
+        L, _bottom = layout_of(s)
         align = "center" if L["align"] == "center" else "left"
         is_stabilo = (s.get("style") == "stabilo")
-        fit = fit_text_layout(zone, cover, s.get("headline", ""), s.get("body", ""))
+        fit = fit_text_layout(zone, cover, s.get("headline", ""), s.get("body", ""), L=L, bottom=_bottom)
         hweight = 700 if G_HEAD_BOLD else 400
         if s.get("headline"):
             hcolor = STABILO_TXT if is_stabilo else body_txt
@@ -2299,26 +2332,24 @@ def luna_vision_spec(im, text):
     except Exception:
         return None
     prompt = (
-        "Kamu layout director. LIHAT foto ini (teks putih akan ditaruh di atasnya).\n"
-        "Jawab:\n"
-        "- face_h: posisi horizontal WAJAH/KEPALA orang utama -> left / center / right\n"
-        "- face_v: posisi vertikal wajah/kepala -> top / middle / bottom\n"
-        "- overlay: seberapa gelap lapisan hitam biar teks kebaca -> low / medium / high "
-        "(foto terang/ramai -> high)\n"
-        "Kalau NGGAK ada orang, isi face_h & face_v = 'none'.\n"
-        'Balas HANYA JSON: {"face_h":"...","face_v":"...","overlay":"..."}')
+        "Kamu layout director. LIHAT foto ini. Teks putih (judul+isi) akan ditaruh di atas foto.\n"
+        "Tunjuk KOTAK area paling KOSONG & tenang buat naruh teks — HINDARI wajah/kepala/badan orang "
+        "dan objek penting. Kotak sebaiknya cukup lebar.\n"
+        "Koordinat PECAHAN: 0 = kiri/atas, 1 = kanan/bawah. box = [x0, y0, x1, y1].\n"
+        "Juga overlay: low / medium / high (foto terang/ramai -> high).\n"
+        'Balas HANYA JSON: {"box":[x0,y0,x1,y1],"overlay":"..."}')
     data = _openai_vision_json(prompt, img_bytes)
     if not isinstance(data, dict):
         return None
     out = {}
     ov = str(data.get("overlay", "")).lower().strip()
-    fh = str(data.get("face_h", "")).lower().strip()
-    fv = str(data.get("face_v", "")).lower().strip()
     if ov in _OVERLAY_MULT:
         out["overlay"] = ov
-    if fh in ("left", "center", "right") and fv in ("top", "middle", "bottom"):
-        out["face_h"] = fh
-        out["face_v"] = fv
+    b = data.get("box")
+    if isinstance(b, (list, tuple)) and len(b) == 4:
+        sb = _sanitize_box(b)
+        if sb:
+            out["box"] = sb
     return out or None
 
 # Urutan otak: 'openai' (Luna utama) -> gratis cadangan. Bisa diubah via AI_PRIMARY.
@@ -3201,7 +3232,7 @@ def process_page(page, workdir, mem=None, revision=None):
                 full_img = film_grade(im)                                # foto utuh -> crop editable di Figma
 
         # posisi teks (zone) sesuai gaya
-        vspec = None
+        vspec = None; slide_layout = None
         if eff_style == "card" and not is_custom:
             zone = "card"
         elif eff_style == "panel" and not is_custom:
@@ -3211,11 +3242,14 @@ def process_page(page, workdir, mem=None, revision=None):
         elif i == 1:
             zone = "bottom"                 # cover default: teks bawah
         else:
-            # PENEMPATAN: Luna LIHAT foto -> tunjuk posisi orang (andal di pose susah),
-            # lalu zona teks dipilih JAUH dari orang (+ deteksi lokal sbg cadangan).
+            # PENEMPATAN BEBAS: Luna kasih KOTAK kosong persis -> teks dijejelin ke situ.
+            # Fallback: detektor lokal + 5 zona (kalau Luna/vision mati).
             vspec = luna_vision_spec(base, (headline + " " + body)) if theme == "dark" else None
-            _avoid = _face_zone_box(vspec["face_h"], vspec["face_v"]) if (vspec and vspec.get("face_h")) else None
-            zone = analyze_zone(base, _avoid)
+            if vspec and vspec.get("box"):
+                zone = "free"
+                slide_layout = _free_layout(vspec["box"])
+            else:
+                zone = analyze_zone(base)
 
         clean_path = os.path.join(workdir, f"clean_{i}.png")
         base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
@@ -3247,7 +3281,7 @@ def process_page(page, workdir, mem=None, revision=None):
                             "image_path": img_path, "clean_path": clean_path,
                             "full_path": full_path, "crop_rect": crop_rect,
                             "index": i, "total": total, "zone": zone,
-                            "veil": veil,
+                            "veil": veil, "layout": slide_layout,
                             "theme": theme, "style": eff_style})
 
         # --- #2 CEK MANDIRI (AI vision) — CUKUP slide COVER biar hemat kuota gratis Gemini ---
