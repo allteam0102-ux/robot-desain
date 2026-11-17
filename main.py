@@ -1342,12 +1342,12 @@ def fit_text_layout(zone, cover, headline, body, L=None, bottom=None):
         btop = max(body_min, top0 + hh + (GAP if hl else 0.0))
         if btop + bh <= bottom:
             break
-        if hpx > 24 and hh >= bh:
-            hpx = max(24, int(hpx * 0.94))
-        elif bpx > 16:
-            bpx = max(16, int(bpx * 0.95))
-        elif hpx > 18:
-            hpx = max(18, int(hpx * 0.94))
+        if hpx > 30 and hh >= bh:
+            hpx = max(30, int(hpx * 0.94))
+        elif bpx > 25:
+            bpx = max(25, int(bpx * 0.95))      # body nggak pernah lebih kecil dari 25px (kebaca)
+        elif hpx > 28:
+            hpx = max(28, int(hpx * 0.94))
         else:
             break
     hl = _est_lines(headline, hw_px, hpx, True)
@@ -3261,16 +3261,16 @@ def process_page(page, workdir, mem=None, revision=None):
             # Cuma kalau zona terbaik pun MASIH ketimpa orang parah (orang di tengah) -> baru pakai
             # KOTAK BEBAS dari Luna. Jadi tetap variatif tapi nggak nabrak wajah.
             vspec = luna_vision_spec(base, (headline + " " + body)) if theme == "dark" else None
-            _avoid = vspec.get("people_box") if vspec else None     # kotak SELURUH orang (kepala-kaki)
-            if _avoid is None:
-                _ls = _face_box(base) or _person_box(base)          # cadangan lokal
-                _avoid = _xywh_to_xyxy(_ls) if _ls else None
-            zone = analyze_zone(base, _avoid)
-            if _avoid and vspec and vspec.get("box"):
-                _reg = _ZONE_TEXT_REGION.get(zone, _ZONE_TEXT_REGION["bottom"])
-                if _ov_box(_reg, _avoid) > 0.30:        # zona terbaik pun masih ketimpa orang -> kotak bebas
-                    zone = "free"
-                    slide_layout = _free_layout(vspec["box"])
+            # Teks = BAND full-width (biar BESAR & kebaca). Pilih ATAS/BAWAH yang jauh dari KEPALA orang.
+            # Badan boleh ketiban teks (veil bikin tetap kebaca); yang penting hindari WAJAH & bukan kolom sempit.
+            _pb = vspec.get("people_box") if vspec else None
+            if _pb is None:
+                _ls = _face_box(base) or _person_box(base)
+                _pb = _xywh_to_xyxy(_ls) if _ls else None
+            if _pb:
+                zone = "bottom" if _pb[1] < 0.44 else "top"   # kepala di atas -> teks ke bawah
+            else:
+                zone = analyze_zone(base)
 
         clean_path = os.path.join(workdir, f"clean_{i}.png")
         base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
