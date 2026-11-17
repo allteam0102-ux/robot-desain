@@ -1223,6 +1223,16 @@ def _sanitize_box(box):
         y1 = _clamp(y0 + 0.30, 0.30, 0.93)
     return (round(x0, 3), round(y0, 3), round(x1, 3), round(y1, 3))
 
+def _clamp_box(b):
+    """Rapikan kotak (urutkan + clamp 0..1). Buat kotak 'area orang' dari Luna."""
+    try:
+        x0, y0, x1, y1 = [float(v) for v in b]
+    except Exception:
+        return None
+    x0, x1 = min(x0, x1), max(x0, x1)
+    y0, y1 = min(y0, y1), max(y0, y1)
+    return (_clamp(x0, 0.0, 1.0), _clamp(y0, 0.0, 1.0), _clamp(x1, 0.0, 1.0), _clamp(y1, 0.0, 1.0))
+
 def _free_layout(box):
     """Kotak bebas (x0,y0,x1,y1) dari Luna -> L (hx,hy,hw,bx,by,bw,align,bottom)."""
     x0, y0, x1, y1 = box
@@ -2334,12 +2344,12 @@ def luna_vision_spec(im, text):
     prompt = (
         "Kamu layout director. LIHAT foto ini. Teks putih akan ditaruh di atas foto.\n"
         "CATATAN: pojok KANAN-ATAS ada label brand & bagian BAWAH ada footer/tombol -> JANGAN taruh teks di situ.\n"
-        "Jawab:\n"
-        "- face_h: posisi horizontal orang utama -> left / center / right (atau none)\n"
-        "- face_v: posisi vertikal orang utama -> top / middle / bottom (atau none)\n"
-        "- box: kotak area KOSONG buat teks [x0,y0,x1,y1] pecahan 0..1 (hindari orang, label brand, footer)\n"
-        "- overlay: low / medium / high (foto terang/ramai -> high)\n"
-        'Balas HANYA JSON: {"face_h":"...","face_v":"...","box":[x0,y0,x1,y1],"overlay":"..."}')
+        "Jawab (koordinat PECAHAN 0..1, 0=kiri/atas):\n"
+        "- people_box: kotak yang MENUTUPI SEMUA ORANG, dari KEPALA sampai BADAN/KAKI [x0,y0,x1,y1]. "
+        "Kalau nggak ada orang -> [0,0,0,0].\n"
+        "- box: kotak area KOSONG buat teks [x0,y0,x1,y1] (jauh dari orang, label brand, footer).\n"
+        "- overlay: low / medium / high (foto terang/ramai -> high).\n"
+        'Balas HANYA JSON: {"people_box":[x0,y0,x1,y1],"box":[x0,y0,x1,y1],"overlay":"..."}')
     data = _openai_vision_json(prompt, img_bytes)
     if not isinstance(data, dict):
         return None
@@ -2347,11 +2357,9 @@ def luna_vision_spec(im, text):
     ov = str(data.get("overlay", "")).lower().strip()
     if ov in _OVERLAY_MULT:
         out["overlay"] = ov
-    fh = str(data.get("face_h", "")).lower().strip()
-    fv = str(data.get("face_v", "")).lower().strip()
-    if fh in ("left", "center", "right") and fv in ("top", "middle", "bottom"):
-        out["face_h"] = fh
-        out["face_v"] = fv
+    pb = _clamp_box(data.get("people_box"))
+    if pb and (pb[2] - pb[0]) > 0.02 and (pb[3] - pb[1]) > 0.02:
+        out["people_box"] = pb
     b = data.get("box")
     if isinstance(b, (list, tuple)) and len(b) == 4:
         sb = _sanitize_box(b)
@@ -3253,11 +3261,14 @@ def process_page(page, workdir, mem=None, revision=None):
             # Cuma kalau zona terbaik pun MASIH ketimpa orang parah (orang di tengah) -> baru pakai
             # KOTAK BEBAS dari Luna. Jadi tetap variatif tapi nggak nabrak wajah.
             vspec = luna_vision_spec(base, (headline + " " + body)) if theme == "dark" else None
-            _avoid = _face_zone_box(vspec["face_h"], vspec["face_v"]) if (vspec and vspec.get("face_h")) else None
+            _avoid = vspec.get("people_box") if vspec else None     # kotak SELURUH orang (kepala-kaki)
+            if _avoid is None:
+                _ls = _face_box(base) or _person_box(base)          # cadangan lokal
+                _avoid = _xywh_to_xyxy(_ls) if _ls else None
             zone = analyze_zone(base, _avoid)
-            if _avoid and vspec.get("box"):
+            if _avoid and vspec and vspec.get("box"):
                 _reg = _ZONE_TEXT_REGION.get(zone, _ZONE_TEXT_REGION["bottom"])
-                if _ov_box(_reg, _avoid) > 0.33:        # zona terbaik pun masih ketimpa orang -> kotak bebas
+                if _ov_box(_reg, _avoid) > 0.30:        # zona terbaik pun masih ketimpa orang -> kotak bebas
                     zone = "free"
                     slide_layout = _free_layout(vspec["box"])
 
