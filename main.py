@@ -2428,7 +2428,7 @@ def local_parse_command(text):
     low = (text or "").lower()
     def has(*kw): return any(k in low for k in kw)
     d = {"head_scale_delta": 0.0, "body_scale_delta": 0.0, "scrim_delta": 0.0,
-         "soft_delta": 0.0, "head_bold": None, "new_photo": False,
+         "soft_delta": 0.0, "head_bold": None, "new_photo": False, "zone": None,
          "slides": _slide_nums_in(text), "note": "", "action": "none"}
     notes = []
     # sasaran: apakah nyebut "judul" atau "body/isi" spesifik? kalau "teks" aja -> dua-duanya
@@ -2480,11 +2480,29 @@ def local_parse_command(text):
            "aesthetic", "estetik", "foto lain", "gambar lain", "fotonya jelek", "gambarnya jelek"):
         d["new_photo"] = True; notes.append("foto diganti baru")
 
+    # --- POSISI TEKS (kontrol manual): "slide 3 teksnya ke atas/bawah/kiri/kanan/tengah" ---
+    if has("pindah", "geser", "geserin", "pindahin", "posisi", "taruh", "letak",
+           "naikin", "turunin", "naikkan", "turunkan", "ke atas", "ke bawah", "ke kiri", "ke kanan", "ke tengah"):
+        if has("ke atas", "keatas", "naikin", "naikkan") or (has("naik") and not has("bawah")):
+            d["zone"] = "top"
+        elif has("ke bawah", "kebawah", "turunin", "turunkan", "turun"):
+            d["zone"] = "bottom"
+        elif has("ke kiri", "kiri"):
+            d["zone"] = "left"
+        elif has("ke kanan", "kanan"):
+            d["zone"] = "right"
+        elif has("ke tengah", "tengah", "center"):
+            d["zone"] = "center"
+        if d["zone"]:
+            _zid = {"top": "atas", "bottom": "bawah", "left": "kiri", "right": "kanan", "center": "tengah"}[d["zone"]]
+            notes.append("posisi teks ke " + _zid)
+
     _rev_kata = ("ganti", "ubah", "revisi", "perbaiki", "kurang", "jelek", "buram", "norak",
                  "kegedean", "kekecilan", "lebih ", "jangan", "terlalu", "bold", "tebal",
                  "tipis", "tebel", "numpuk", "tumpang", "ketimpa", "nabrak", "pindah", "geser")
-    any_change = (abs(d["head_scale_delta"]) + abs(d["body_scale_delta"]) + abs(d["scrim_delta"])
-                  + abs(d["soft_delta"]) >= 0.01) or (d["head_bold"] is not None) or d["new_photo"]
+    any_change = ((abs(d["head_scale_delta"]) + abs(d["body_scale_delta"]) + abs(d["scrim_delta"])
+                  + abs(d["soft_delta"]) >= 0.01) or (d["head_bold"] is not None)
+                  or d["new_photo"] or bool(d["zone"]))
     if any_change or has(*_rev_kata):
         d["action"] = "revise"
     d["note"] = (", ".join(notes) or (text or "")[:60])
@@ -2515,6 +2533,8 @@ def _merge_cmd(ai_data, local):
         ai_data["new_photo"] = True
     if not ai_data.get("slides") and local.get("slides"):
         ai_data["slides"] = local["slides"]
+    if local.get("zone"):
+        ai_data["zone"] = local["zone"]
     if local.get("action") == "revise" and ai_data.get("action") != "revise":
         ai_data["action"] = "revise"
     return ai_data
@@ -2784,7 +2804,7 @@ def ai_learn_from_example(image_path):
     data = vision_json(prompt, image_path)
     return data if isinstance(data, dict) else None
 
-def _queue_revision(mem, rec, reason_label, new_photo=False, slides=None):
+def _queue_revision(mem, rec, reason_label, new_photo=False, slides=None, force_zone=None):
     """Masukkan konten ke antrian revisi (biar run berikutnya di-generate ulang).
     new_photo=True -> ambil gambar baru; slides=[] -> semua slide, [3] -> cuma slide 3."""
     page_id = ((rec or {}).get("page_id") or "").replace("-", "")   # normalisasi kunci
@@ -2807,6 +2827,13 @@ def _queue_revision(mem, rec, reason_label, new_photo=False, slides=None):
         entry["slides"] = []                # ada yg minta "semua" -> semua
     else:
         entry["slides"] = sorted(set(entry["slides"]) | set(new))
+    if force_zone in ("top", "bottom", "left", "right", "center"):
+        fz = entry.setdefault("force_zone", {})
+        if new:
+            for s in new:
+                fz[str(s)] = force_zone
+        else:
+            fz["all"] = force_zone      # nggak nyebut slide -> semua slide
     q[page_id] = entry
     return True
 
@@ -2926,10 +2953,11 @@ def process_feedback(mem):
                     slides = [int(x) for x in slides]
                 except Exception:
                     slides = _slide_nums_in(text)
+                fzone = (data or {}).get("zone")
                 latest = _latest_pending(mem)
                 if latest:
                     tok, rec = latest
-                    _queue_revision(mem, rec, "chat: " + note, new_photo=new_photo, slides=slides)
+                    _queue_revision(mem, rec, "chat: " + note, new_photo=new_photo, slides=slides, force_zone=fzone)
                     mem["pending"].pop(tok, None); _mark_resolved(mem, tok)
                     mem["stats"]["rejected"] += 1
                     extra = ("\n" + prefs_summary(prefs)) if ch else ""
@@ -3109,7 +3137,8 @@ def process_page(page, workdir, mem=None, revision=None):
         if _c and _c.get("hash") == content_hash:
             _np = bool((revision or {}).get("new_photo"))
             _sl = set((revision or {}).get("slides") or [])
-            rev_reuse = {"cache": _c, "new_photo": _np, "slides": _sl}
+            rev_reuse = {"cache": _c, "new_photo": _np, "slides": _sl,
+                         "force_zone": (revision or {}).get("force_zone") or {}}
             print(f"  [revisi: cache cocok. new_photo={_np}, slide target={sorted(_sl) or 'semua'}]")
         else:
             print("  [revisi: cache nggak ada/konten berubah -> generate ulang penuh]")
@@ -3248,7 +3277,11 @@ def process_page(page, workdir, mem=None, revision=None):
 
         # posisi teks (zone) sesuai gaya
         vspec = None; slide_layout = None
-        if eff_style == "card" and not is_custom:
+        _fz = (rev_reuse or {}).get("force_zone") or {}
+        _fzone = _fz.get(str(i)) or _fz.get("all")
+        if _fzone in ("top", "bottom", "left", "right", "center"):
+            zone = _fzone                   # KONTROL MANUAL: posisi dipaksa dari ketikan user
+        elif eff_style == "card" and not is_custom:
             zone = "card"
         elif eff_style == "panel" and not is_custom:
             zone = "panel"
