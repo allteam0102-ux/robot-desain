@@ -1216,7 +1216,7 @@ def _sanitize_box(box):
     x0, x1 = min(x0, x1), max(x0, x1)
     y0, y1 = min(y0, y1), max(y0, y1)
     x0 = _clamp(x0, 0.04, 0.60); x1 = _clamp(x1, 0.40, 0.96)
-    y0 = _clamp(y0, 0.05, 0.70); y1 = _clamp(y1, 0.30, 0.93)
+    y0 = _clamp(y0, 0.11, 0.66); y1 = _clamp(y1, 0.34, 0.88)   # jauhi label brand (atas) & footer (bawah)
     if x1 - x0 < 0.42:
         c = (x0 + x1) / 2; x0 = _clamp(c - 0.21, 0.04, 0.54); x1 = _clamp(c + 0.21, 0.42, 0.96)
     if y1 - y0 < 0.24:
@@ -2332,12 +2332,14 @@ def luna_vision_spec(im, text):
     except Exception:
         return None
     prompt = (
-        "Kamu layout director. LIHAT foto ini. Teks putih (judul+isi) akan ditaruh di atas foto.\n"
-        "Tunjuk KOTAK area paling KOSONG & tenang buat naruh teks — HINDARI wajah/kepala/badan orang "
-        "dan objek penting. Kotak sebaiknya cukup lebar.\n"
-        "Koordinat PECAHAN: 0 = kiri/atas, 1 = kanan/bawah. box = [x0, y0, x1, y1].\n"
-        "Juga overlay: low / medium / high (foto terang/ramai -> high).\n"
-        'Balas HANYA JSON: {"box":[x0,y0,x1,y1],"overlay":"..."}')
+        "Kamu layout director. LIHAT foto ini. Teks putih akan ditaruh di atas foto.\n"
+        "CATATAN: pojok KANAN-ATAS ada label brand & bagian BAWAH ada footer/tombol -> JANGAN taruh teks di situ.\n"
+        "Jawab:\n"
+        "- face_h: posisi horizontal orang utama -> left / center / right (atau none)\n"
+        "- face_v: posisi vertikal orang utama -> top / middle / bottom (atau none)\n"
+        "- box: kotak area KOSONG buat teks [x0,y0,x1,y1] pecahan 0..1 (hindari orang, label brand, footer)\n"
+        "- overlay: low / medium / high (foto terang/ramai -> high)\n"
+        'Balas HANYA JSON: {"face_h":"...","face_v":"...","box":[x0,y0,x1,y1],"overlay":"..."}')
     data = _openai_vision_json(prompt, img_bytes)
     if not isinstance(data, dict):
         return None
@@ -2345,6 +2347,11 @@ def luna_vision_spec(im, text):
     ov = str(data.get("overlay", "")).lower().strip()
     if ov in _OVERLAY_MULT:
         out["overlay"] = ov
+    fh = str(data.get("face_h", "")).lower().strip()
+    fv = str(data.get("face_v", "")).lower().strip()
+    if fh in ("left", "center", "right") and fv in ("top", "middle", "bottom"):
+        out["face_h"] = fh
+        out["face_v"] = fv
     b = data.get("box")
     if isinstance(b, (list, tuple)) and len(b) == 4:
         sb = _sanitize_box(b)
@@ -3242,14 +3249,17 @@ def process_page(page, workdir, mem=None, revision=None):
         elif i == 1:
             zone = "bottom"                 # cover default: teks bawah
         else:
-            # PENEMPATAN BEBAS: Luna kasih KOTAK kosong persis -> teks dijejelin ke situ.
-            # Fallback: detektor lokal + 5 zona (kalau Luna/vision mati).
+            # HYBRID: default pakai 5 ZONA (variatif) + hindari orang (posisi dari Luna / deteksi lokal).
+            # Cuma kalau zona terbaik pun MASIH ketimpa orang parah (orang di tengah) -> baru pakai
+            # KOTAK BEBAS dari Luna. Jadi tetap variatif tapi nggak nabrak wajah.
             vspec = luna_vision_spec(base, (headline + " " + body)) if theme == "dark" else None
-            if vspec and vspec.get("box"):
-                zone = "free"
-                slide_layout = _free_layout(vspec["box"])
-            else:
-                zone = analyze_zone(base)
+            _avoid = _face_zone_box(vspec["face_h"], vspec["face_v"]) if (vspec and vspec.get("face_h")) else None
+            zone = analyze_zone(base, _avoid)
+            if _avoid and vspec.get("box"):
+                _reg = _ZONE_TEXT_REGION.get(zone, _ZONE_TEXT_REGION["bottom"])
+                if _ov_box(_reg, _avoid) > 0.33:        # zona terbaik pun masih ketimpa orang -> kotak bebas
+                    zone = "free"
+                    slide_layout = _free_layout(vspec["box"])
 
         clean_path = os.path.join(workdir, f"clean_{i}.png")
         base.save(clean_path, "PNG")                        # foto bersih utk .svg (Figma)
