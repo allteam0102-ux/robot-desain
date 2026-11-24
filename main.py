@@ -716,7 +716,18 @@ def pexels_collection_candidates(used_ids):
     random.shuffle(ids)
     for cid in ids[:2]:
         try:
-            page = random.randint(1, 3) if SMART_PHOTO_DEEP else 1
+            page = 1
+            if SMART_PHOTO_DEEP:
+                # tanya dulu koleksinya sekarang isinya berapa -> halaman acak ngikut
+                # jumlah foto saat ini, jadi koleksi yg terus nambah otomatis kejangkau
+                try:
+                    probe = requests.get(f"https://api.pexels.com/v1/collections/{cid}",
+                                         headers={"Authorization": PEXELS_API_KEY},
+                                         params={"per_page": 1, "type": "photos"}, timeout=30)
+                    total = int((probe.json() or {}).get("total_results") or 0) if probe.status_code == 200 else 0
+                except Exception:
+                    total = 0
+                page = random.randint(1, max(1, (total + 79) // 80))
             r = requests.get(f"https://api.pexels.com/v1/collections/{cid}",
                              headers={"Authorization": PEXELS_API_KEY},
                              params={"per_page": 80, "page": page, "type": "photos"}, timeout=60)
