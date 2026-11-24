@@ -636,6 +636,36 @@ SMART_PHOTO      = (os.environ.get("SMART_PHOTO") or "true").lower() == "true"
 SMART_PHOTO_POOL = int(os.environ.get("SMART_PHOTO_POOL") or 9)    # jumlah kandidat yg dilihat AI (2-12)
 SMART_PHOTO_DEEP = (os.environ.get("SMART_PHOTO_DEEP") or "true").lower() == "true"  # ngubek halaman DALAM koleksi
 
+# Catatan pilihan foto konten yang LAGI dikerjakan (dipakai waktu kamu kasih bintang).
+# Diisi tiap ai_pick_best_photo berhasil milih, dikosongin tiap konten baru.
+_PHOTO_PICKS = []
+# Ringkasan "memori emas" foto -> diselipin ke prompt pemilih foto. Diisi dari memory.json.
+_GOLD_PHOTO_HINT = ""
+
+def set_gold_photo_hint(mem):
+    """Susun contoh gaya foto yang pernah kamu kasih ⭐5 (dan yang ⭐1-2) jadi petunjuk singkat."""
+    global _GOLD_PHOTO_HINT
+    try:
+        suka, hindari = [], []
+        for g in (mem.get("emas_foto") or [])[-6:]:
+            for p in (g.get("picks") or [])[:3]:
+                a = (p.get("alasan") or "").strip()
+                if a and a not in suka:
+                    suka.append(a)
+        for b in (mem.get("buruk_foto") or [])[-4:]:
+            for p in (b.get("picks") or [])[:2]:
+                a = (p.get("alasan") or "").strip()
+                if a and a not in hindari:
+                    hindari.append(a)
+        bits = []
+        if suka:
+            bits.append("CONTOH yang dia kasih nilai ⭐5 (tiru seleranya): " + " | ".join(suka[:8]))
+        if hindari:
+            bits.append("Yang dia kasih nilai rendah (hindari yang mirip): " + " | ".join(hindari[:5]))
+        _GOLD_PHOTO_HINT = ("\n" + "\n".join(bits) + "\n") if bits else ""
+    except Exception:
+        _GOLD_PHOTO_HINT = ""
+
 def _u_cand(p, mine=True):
     """1 item foto Unsplash -> kandidat standar (punya thumb biar hemat kuota)."""
     urls = (p or {}).get("urls", {}) or {}
@@ -797,8 +827,9 @@ def ai_pick_best_photo(cands, slide_text):
     prompt = (
         f"Kamu art director brand konseling pernikahan Islami. Gambar ini LEMBAR KONTAK "
         f"berisi {len(thumbs)} foto kandidat; tiap foto ada NOMOR di pojok kiri atas.\n"
-        f'Teks slide yang nanti ditempel DI ATAS foto: "{(slide_text or "")[:220]}"\n\n'
-        "Pilih SATU nomor yang PALING COCOK. Urutan pertimbangan:\n"
+        f'Teks slide yang nanti ditempel DI ATAS foto: "{(slide_text or "")[:220]}"\n'
+        + _GOLD_PHOTO_HINT +
+        "\nPilih SATU nomor yang PALING COCOK. Urutan pertimbangan:\n"
         "1. NYAMBUNG sama makna teks slide (adegan/subjeknya masuk akal buat teks itu)\n"
         "2. Ada AREA LAPANG (langit/dinding/lantai/background polos) buat naruh teks\n"
         "3. Tenang & editorial: nggak ramai, cahaya lembut, warna nggak norak\n"
@@ -811,6 +842,11 @@ def ai_pick_best_photo(cands, slide_text):
         if 1 <= n <= len(keep):
             why = str((data or {}).get("alasan") or "").strip()[:60]
             print(f"    [mata AI pilih foto #{n} dari {len(keep)}" + (f" — {why}]" if why else "]"))
+            try:    # dicatat buat penilaian bintang nanti
+                _PHOTO_PICKS.append({"id": keep[n - 1].get("id"), "alasan": why,
+                                     "teks": (slide_text or "")[:70]})
+            except Exception:
+                pass
             return keep[n - 1]
     except Exception:
         pass
@@ -3069,6 +3105,40 @@ def _mark_resolved(mem, tok):
     if len(res) > 500:
         del res[:len(res) - 500]
 
+def _simpan_bintang(mem, prefs, rp, sisi, nilai):
+    """Simpan bintang ke memori. 5 = masuk 'MEMORI EMAS' (permanen, jadi patokan).
+    foto  -> gaya foto yg disukai/dihindari, dibawa ke prompt pemilih foto
+    desain-> snapshot setelan (judul/body/overlay) sebagai titik aman"""
+    mem.setdefault("ratings", []).append(
+        {"ts": int(time.time()), "title": rp.get("title"), "sisi": sisi, "nilai": nilai})
+    mem["ratings"] = mem["ratings"][-200:]
+    if sisi == "foto":
+        if nilai == 5:
+            mem.setdefault("emas_foto", []).append(
+                {"ts": int(time.time()), "title": rp.get("title"), "picks": rp.get("picks") or []})
+            mem["emas_foto"] = mem["emas_foto"][-30:]
+            return "⭐5 — gaya fotonya jadi PATOKAN EMAS!"
+        if nilai == 4:
+            return "⭐4 — dicatat sebagai contoh bagus 👍"
+        if nilai <= 2:
+            mem.setdefault("buruk_foto", []).append(
+                {"ts": int(time.time()), "title": rp.get("title"), "picks": rp.get("picks") or []})
+            mem["buruk_foto"] = mem["buruk_foto"][-15:]
+            return f"⭐{nilai} — gaya foto kayak gini bakal dihindari."
+        return "⭐3 — netral, kecatat."
+    if nilai == 5:
+        mem["prefs_emas"] = dict(rp.get("prefs") or prefs)
+        return "⭐5 — setelan desain ini jadi PATOKAN EMAS!"
+    if nilai == 4:
+        return "⭐4 — dicatat 👍"
+    if nilai <= 2 and mem.get("prefs_emas"):
+        ge = mem["prefs_emas"]
+        for k in ("head_scale", "body_scale", "scrim", "soft"):
+            if isinstance(prefs.get(k), (int, float)) and isinstance(ge.get(k), (int, float)):
+                prefs[k] = round(prefs[k] + (ge[k] - prefs[k]) * 0.35, 3)
+        return f"⭐{nilai} — setelan digeser balik ke arah patokan emas."
+    return f"⭐{nilai} — kecatat."
+
 def process_feedback(mem):
     """Baca pencetan tombol sejak run terakhir, update stats + knob.
     Knob diterapkan BERDASARKAN alasan yg dipencet (tidak tergantung 'pending'),
@@ -3225,7 +3295,8 @@ def process_feedback(mem):
                "page_id": pid_cb or pend.get("page_id"),
                "revision": pend.get("revision", 0)}
 
-        if kind == "a":                      # approve (1x pencet) -> FINAL
+        if kind == "a":                      # approve (1x pencet) -> lanjut minta BINTANG
+            picks = pend.get("picks") or []
             mem["pending"].pop(tok, None)
             mem["stats"]["approved"] += 1
             _mark_resolved(mem, tok); processed += 1
@@ -3234,7 +3305,41 @@ def process_feedback(mem):
                 mem.get("revise_queue", {}).pop(pid_norm, None)   # batal revisi, udah oke
             mem["log"].append({"ts": int(time.time()), "title": rec["title"],
                                "status": "approved", "reason": ""})
-            tg_answer_callback(cb_id, "✅ Disimpan sebagai contoh bagus!")
+            tg_answer_callback(cb_id, "✅ Oke! Sekarang kasih bintang ya 👇")
+            # ---- minta 2 nilai terpisah: FOTO & DESAIN ----
+            rtok = secrets.token_hex(4)
+            mem.setdefault("rating_pending", {})[rtok] = {
+                "title": rec["title"], "page_id": rec.get("page_id"),
+                "ts": int(time.time()), "picks": picks,
+                "prefs": dict(prefs), "foto": None, "desain": None}
+            tg_buttons(
+                f"⭐ Nilai '{rec['title']}' — dua-duanya ya:\n"
+                "📷 FOTO = pilihan fotonya nyambung & enak dilihat?\n"
+                "🎨 DESAIN = tata letak, ukuran teks, overlay\n"
+                "(5 = patokan emas, bot bakal niru ini terus)",
+                [[(f"📷 {n}", f"rf:{rtok}:{n}") for n in range(1, 6)],
+                 [(f"🎨 {n}", f"rd:{rtok}:{n}") for n in range(1, 6)]])
+        elif kind in ("rf", "rd"):           # ⭐ bintang: rf = FOTO, rd = DESAIN
+            try:
+                nilai = int(parts[2]) if len(parts) > 2 else 0
+            except Exception:
+                nilai = 0
+            rp = mem.setdefault("rating_pending", {}).get(tok)
+            if not rp or not (1 <= nilai <= 5):
+                tg_answer_callback(cb_id, "Penilaian ini udah kedaluwarsa 🙏")
+            else:
+                sisi = "foto" if kind == "rf" else "desain"
+                if rp.get(sisi) is not None:
+                    tg_answer_callback(cb_id, f"{sisi.capitalize()} udah dinilai ({rp[sisi]}⭐) 👍")
+                else:
+                    rp[sisi] = nilai
+                    processed += 1
+                    tg_answer_callback(cb_id, _simpan_bintang(mem, prefs, rp, sisi, nilai))
+                    if rp.get("foto") is not None and rp.get("desain") is not None:
+                        mem["rating_pending"].pop(tok, None)
+                        _mark_resolved(mem, tok)
+                        tg_message(f"🙏 Makasih! '{rp['title']}' kecatat — "
+                                   f"📷 {rp['foto']}⭐ / 🎨 {rp['desain']}⭐")
         elif kind == "rs":                   # reject + alasan (1x pencet) -> knob + antri revisi
             if code == "other":   # tombol lama: sekarang cukup KETIK langsung
                 tg_answer_callback(cb_id, "Ketik aja perintah revisimu langsung ya 🙂")
@@ -3322,6 +3427,10 @@ def apply_prefs_to_globals(mem):
 # 8. PROSES SATU KONTEN
 # ======================================================================
 def process_page(page, workdir, mem=None, revision=None):
+    global _PHOTO_PICKS
+    _PHOTO_PICKS = []                       # catatan pilihan foto konten ini
+    if mem is not None:
+        set_gold_photo_hint(mem)            # selera ⭐5 kamu dibawa ke pemilih foto
     props = page["properties"]
     page_id = page.get("id", "")
     title = get_title(props) or "Tanpa Judul"
@@ -3662,7 +3771,8 @@ def process_page(page, workdir, mem=None, revision=None):
         token = secrets.token_hex(4)
         pid_cb = (page_id or "").replace("-", "")     # page_id ditaruh di tombol (anti-hilang)
         mem["pending"][token] = {"title": title, "page_id": page_id,
-                                 "ts": int(time.time()), "revision": rev_n}
+                                 "ts": int(time.time()), "revision": rev_n,
+                                 "picks": list(_PHOTO_PICKS)}
         rows = [[("✅ Approve semua (oke!)", f"a:{token}:{pid_cb}")],
                 [("🖼️ Foto aja udah pas", f"af:{token}:{pid_cb}")]]
         rr = []
