@@ -352,7 +352,7 @@ def keyword_for(index, keyword_blocks, headline, body):
         q = "aesthetic minimal"
     q = re.sub(r"==|~~", "", q)
     words = re.sub(r"[^\w\s]", " ", q).split()
-    return " ".join(words[:4]) if words else "aesthetic minimal"
+    return " ".join(words[:6]) if words else "aesthetic minimal"
 
 def parse_highlights(text):
     out = []
@@ -424,7 +424,7 @@ def extract_gaya(block):
 FALLBACK_QUERIES = ["editorial lifestyle couple", "soft film tone portrait", "minimal european street"]
 
 def _short_q(query, add_hint=True):
-    words = (query or "").split()[:3]
+    words = (query or "").split()[:6]
     q = " ".join(words) if words else "aesthetic portrait"
     if add_hint and STYLE_HINT:
         q = (q + " " + " ".join(STYLE_HINT.split()[:2])).strip()
@@ -628,7 +628,221 @@ def _pexels_candidates(query):
             out.append({"id": str(p["id"]), "url": u, "credit": f'Foto: {p.get("photographer","-")} (Pexels)'})
     return out
 
-def image_pick(query, used_ids):
+# ======================================================================
+# 4b. PILIH FOTO PINTAR: kumpulin BANYAK kandidat -> MATA AI yang milih
+#     (dulu: ambil 15 hasil -> potong 8 -> random.choice = murni undian)
+# ======================================================================
+SMART_PHOTO      = (os.environ.get("SMART_PHOTO") or "true").lower() == "true"
+SMART_PHOTO_POOL = int(os.environ.get("SMART_PHOTO_POOL") or 9)    # jumlah kandidat yg dilihat AI (2-12)
+SMART_PHOTO_DEEP = (os.environ.get("SMART_PHOTO_DEEP") or "true").lower() == "true"  # ngubek halaman DALAM koleksi
+
+def _u_cand(p, mine=True):
+    """1 item foto Unsplash -> kandidat standar (punya thumb biar hemat kuota)."""
+    urls = (p or {}).get("urls", {}) or {}
+    full = urls.get("regular") or urls.get("full") or urls.get("raw")
+    if not (full and p.get("id")):
+        return None
+    name = (p.get("user") or {}).get("name", "-")
+    return {"id": str(p["id"]), "url": full,
+            "thumb": urls.get("small") or urls.get("thumb") or full,
+            "credit": f"Foto: {name} (Unsplash{', koleksi kamu' if mine else ''})"}
+
+def _p_cand(p, mine=False):
+    src = (p or {}).get("src", {}) or {}
+    full = src.get("large2x") or src.get("large") or src.get("original")
+    if not (full and p.get("id")):
+        return None
+    return {"id": str(p["id"]), "url": full,
+            "thumb": src.get("medium") or src.get("small") or full,
+            "credit": f'Foto: {p.get("photographer","-")} (Pexels{", koleksi kamu" if mine else ""})'}
+
+def unsplash_collection_candidates(query, used_ids):
+    """Kandidat dari koleksi Unsplash kamu:
+    (a) hasil pencarian DI DALAM koleksi (relevan duluan),
+    (b) ngubek halaman ACAK di dalam koleksi -> foto lama ikut punya peluang,
+        bukan cuma 30 foto terbaru kayak sebelumnya."""
+    out, seen = [], set()
+    if not (UNSPLASH_COLLECTIONS and UNSPLASH_ACCESS_KEY):
+        return out
+    hdr = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
+    try:
+        r = requests.get("https://api.unsplash.com/search/photos", headers=hdr,
+                         params={"query": _short_q(query, add_hint=False), "per_page": 30,
+                                 "orientation": PEXELS_ORIENTATION,
+                                 "collections": UNSPLASH_COLLECTIONS}, timeout=60)
+        if r.status_code == 200:
+            for p in r.json().get("results", []):
+                c = _u_cand(p)
+                if c and c["id"] not in seen:
+                    seen.add(c["id"]); out.append(c)
+        else:
+            print(f"    ! kandidat koleksi (cari) {r.status_code}")
+    except Exception as e:
+        print("    ! kandidat koleksi (cari) gagal:", e)
+    if SMART_PHOTO_DEEP:
+        ids = [c.strip() for c in UNSPLASH_COLLECTIONS.split(",") if c.strip()]
+        random.shuffle(ids)
+        for cid in ids[:2]:
+            try:
+                total = 0
+                meta = requests.get(f"https://api.unsplash.com/collections/{cid}",
+                                    headers=hdr, timeout=30)
+                if meta.status_code == 200:
+                    total = int((meta.json() or {}).get("total_photos") or 0)
+                maxpage = max(1, (total + 29) // 30)
+                for page in set([random.randint(1, maxpage), random.randint(1, maxpage)]):
+                    rr = requests.get(f"https://api.unsplash.com/collections/{cid}/photos",
+                                      headers=hdr,
+                                      params={"per_page": 30, "page": page,
+                                              "orientation": PEXELS_ORIENTATION}, timeout=60)
+                    if rr.status_code != 200:
+                        continue
+                    res = rr.json()
+                    if not isinstance(res, list):
+                        continue
+                    for p in res:
+                        c = _u_cand(p)
+                        if c and c["id"] not in seen:
+                            seen.add(c["id"]); out.append(c)
+            except Exception as e:
+                print(f"    ! kandidat koleksi {cid} (ngubek) gagal:", e)
+    fresh = [c for c in out if c["id"] not in used_ids]
+    return fresh or out
+
+def pexels_collection_candidates(used_ids):
+    """Kandidat dari koleksi Pexels kamu (halaman acak kalau DEEP nyala)."""
+    out, seen = [], set()
+    ids = [c.strip() for c in (PEXELS_COLLECTIONS or "").split(",") if c.strip()]
+    random.shuffle(ids)
+    for cid in ids[:2]:
+        try:
+            page = random.randint(1, 3) if SMART_PHOTO_DEEP else 1
+            r = requests.get(f"https://api.pexels.com/v1/collections/{cid}",
+                             headers={"Authorization": PEXELS_API_KEY},
+                             params={"per_page": 80, "page": page, "type": "photos"}, timeout=60)
+            if r.status_code != 200:
+                continue
+            for m in r.json().get("media", []):
+                if (m.get("type") or "").lower() != "photo":
+                    continue
+                c = _p_cand(m, mine=True)
+                if c and c["id"] not in seen:
+                    seen.add(c["id"]); out.append(c)
+        except Exception as e:
+            print(f"    ! kandidat Pexels koleksi {cid} gagal:", e)
+    fresh = [c for c in out if c["id"] not in used_ids]
+    return fresh or out
+
+def _contact_thumb(url, box=(360, 450)):
+    try:
+        d = requests.get(url, timeout=30).content
+        im = Image.open(io.BytesIO(d)).convert("RGB")
+        im.thumbnail(box, Image.LANCZOS)
+        return im
+    except Exception:
+        return None
+
+def ai_pick_best_photo(cands, slide_text):
+    """Susun 'lembar kontak' bernomor dari kandidat -> 1x tanya MATA AI -> kandidat terbaik.
+    None kalau fitur mati / AI gagal (pemanggil balik ke cara lama)."""
+    if not (SMART_PHOTO and OPENAI_API_KEY):
+        return None
+    cands = cands[:max(2, min(12, SMART_PHOTO_POOL))]
+    if len(cands) < 2:
+        return None
+    thumbs, keep = [], []
+    for c in cands:
+        im = _contact_thumb(c.get("thumb") or c.get("url"))
+        if im is not None:
+            thumbs.append(im); keep.append(c)
+    if len(thumbs) < 2:
+        return None
+    try:
+        from PIL import ImageFont
+        font = None
+        for fp in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                   "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+            try:
+                font = ImageFont.truetype(fp, 46); break
+            except Exception:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+    except Exception:
+        font = None
+    cols = 3
+    rows = (len(thumbs) + cols - 1) // cols
+    cw, ch = 360, 450
+    sheet = Image.new("RGB", (cols * cw, rows * ch), (20, 20, 20))
+    d = ImageDraw.Draw(sheet)
+    for i, im in enumerate(thumbs):
+        x, y = (i % cols) * cw, (i // cols) * ch
+        im2 = im.copy(); im2.thumbnail((cw - 10, ch - 10), Image.LANCZOS)
+        sheet.paste(im2, (x + (cw - im2.width) // 2, y + (ch - im2.height) // 2))
+        d.rectangle([x + 6, y + 6, x + 78, y + 70], fill=(0, 0, 0))
+        d.text((x + 24, y + 12), str(i + 1), fill=(255, 255, 255), font=font)
+    buf = io.BytesIO()
+    sheet.save(buf, "JPEG", quality=78)
+    prompt = (
+        f"Kamu art director brand konseling pernikahan Islami. Gambar ini LEMBAR KONTAK "
+        f"berisi {len(thumbs)} foto kandidat; tiap foto ada NOMOR di pojok kiri atas.\n"
+        f'Teks slide yang nanti ditempel DI ATAS foto: "{(slide_text or "")[:220]}"\n\n'
+        "Pilih SATU nomor yang PALING COCOK. Urutan pertimbangan:\n"
+        "1. NYAMBUNG sama makna teks slide (adegan/subjeknya masuk akal buat teks itu)\n"
+        "2. Ada AREA LAPANG (langit/dinding/lantai/background polos) buat naruh teks\n"
+        "3. Tenang & editorial: nggak ramai, cahaya lembut, warna nggak norak\n"
+        "4. TIDAK ada tulisan/logo/watermark di fotonya\n"
+        "5. Sopan & aman buat brand Islami\n"
+        'Balas HANYA JSON: {"pick": <nomor>, "alasan": "<maks 12 kata>"}')
+    data = _openai_vision_json(prompt, buf.getvalue())
+    try:
+        n = int((data or {}).get("pick"))
+        if 1 <= n <= len(keep):
+            why = str((data or {}).get("alasan") or "").strip()[:60]
+            print(f"    [mata AI pilih foto #{n} dari {len(keep)}" + (f" — {why}]" if why else "]"))
+            return keep[n - 1]
+    except Exception:
+        pass
+    return None
+
+def image_pick(query, used_ids, slide_text=None):
+    # 0) PILIH PINTAR: kumpulin banyak kandidat (koleksi kamu duluan) -> mata AI yang milih.
+    if SMART_PHOTO:
+        try:
+            cands = unsplash_collection_candidates(query, used_ids)
+            if len(cands) < 6:
+                cands = cands + pexels_collection_candidates(used_ids)
+            if len(cands) < 6 and UNSPLASH_ACCESS_KEY:
+                try:
+                    cands += [c for c in (_unsplash_candidates(query) or []) if c]
+                except Exception:
+                    pass
+            if len(cands) < 6 and PEXELS_API_KEY:
+                try:
+                    cands += [c for c in (_pexels_candidates(query) or []) if c]
+                except Exception:
+                    pass
+            uniq, seen = [], set()
+            for c in cands:
+                cid = str(c.get("id") or "")
+                if not cid or cid in seen or cid in used_ids:
+                    continue
+                seen.add(cid); uniq.append(c)
+            # 6 teratas = paling relevan (hasil pencarian); sisanya diacak biar variatif
+            head, tail = uniq[:6], uniq[6:]
+            random.shuffle(tail)
+            pool = head + tail[:6]
+            best = ai_pick_best_photo(pool, slide_text or query)
+            if best:
+                try:
+                    d = requests.get(best["url"], timeout=60).content
+                    Image.open(io.BytesIO(d)).verify()
+                    used_ids.add(str(best["id"]))
+                    return d, best["credit"]
+                except Exception as e:
+                    print("    ! unduh foto pilihan AI gagal:", e)
+        except Exception as e:
+            print("    ! pilih-foto-pintar gagal, balik ke cara lama:", e)
     # 1) SUMBER PRIBADI: cari foto yg COCOK (keyword) di koleksi Unsplash kamu.
     #    - Ketemu yg cocok -> pakai (kurasi kamu + nyambung konteks).
     #    - NGGAK ada yg cocok -> JANGAN ambil acak; lanjut ke pencarian COCOK global (step 2).
@@ -3244,7 +3458,7 @@ def process_page(page, workdir, mem=None, revision=None):
             # Vibe tetap kejaga karena foto diprioritaskan dari koleksi kurasi kamu.
             _sh = ""
             _before = set(used_ids)
-            data, credit = image_pick(q, used_ids)
+            data, credit = image_pick(q, used_ids, slide_text=(headline + " " + body).strip())
             if data:
                 # catat foto yg baru kepakai ke riwayat (anti-pakai-ulang < 6 bulan)
                 if mem is not None:
