@@ -2502,6 +2502,56 @@ def prefs_summary(prefs):
             f"body {int(prefs['body_scale']*100)}%, overlay {int(prefs['scrim']*100)}%, "
             f"soft +{int(prefs['soft']*100)}%, judul {'tebal' if prefs.get('head_bold', True) else 'tipis'}.")
 
+def laporan_belajar(mem):
+    """Laporan /cek: sampai mana bot belajar — statistik, bintang, memori emas."""
+    p = mem.get("preferences", {})
+    a = (mem.get("stats") or {}).get("approved", 0)
+    r = (mem.get("stats") or {}).get("rejected", 0)
+    tot = a + r
+    L = ["🧠 PROGRES BELAJAR — Robot Desain Nikah Institute", ""]
+    L.append(f"📊 Approve {a} / Reject {r}" + (f"  ({int(100*a/tot)}% lolos)" if tot else ""))
+
+    ratings = mem.get("ratings") or []
+    def _ringkas(sisi, ikon, label):
+        ns = [x.get("nilai") for x in ratings
+              if x.get("sisi") == sisi and isinstance(x.get("nilai"), int)]
+        if not ns:
+            return f"{ikon} {label}: belum pernah dinilai"
+        return (f"{ikon} {label}: rata-rata {sum(ns)/len(ns):.1f} dari {len(ns)}x"
+                f"  (⭐5 sebanyak {ns.count(5)}x)")
+    L += ["", "⭐ BINTANG", _ringkas("foto", "📷", "Foto"), _ringkas("desain", "🎨", "Desain")]
+
+    emas = mem.get("emas_foto") or []
+    buruk = mem.get("buruk_foto") or []
+    pe = mem.get("prefs_emas")
+    L += ["", "🏆 MEMORI EMAS",
+          f"📷 Contoh foto patokan : {len(emas)} konten",
+          f"🚫 Gaya foto dihindari : {len(buruk)} konten"]
+    if pe:
+        L.append(f"🎨 Titik aman desain   : ADA (judul {int(pe.get('head_scale',1)*100)}%, "
+                 f"body {int(pe.get('body_scale',1)*100)}%, overlay {int(pe.get('scrim',1)*100)}%)")
+    else:
+        L.append("🎨 Titik aman desain   : belum ada")
+
+    L += ["", "🎨 SETELAN DIPAKAI SEKARANG", prefs_summary(p)]
+
+    hist = len(mem.get("photo_history") or {})
+    if hist:
+        L += ["", f"🖼️ {hist} foto lagi istirahat (nggak dipakai ulang {PHOTO_COOLDOWN_DAYS} hari)"]
+
+    contoh = []
+    for g in emas[-5:]:
+        for pk in (g.get("picks") or [])[:2]:
+            s = (pk.get("alasan") or "").strip()
+            if s and s not in contoh:
+                contoh.append(s)
+    if contoh:
+        L += ["", "💡 Gaya foto yang jadi patokan kamu:"] + [f"• {c}" for c in contoh[:6]]
+    else:
+        L += ["", "💡 Belum ada ⭐5 sama sekali. Kasih bintang 5 ke konten yang bener-bener "
+              "'gw banget' — itu yang bikin bot punya patokan buat niru selera kamu."]
+    return "\n".join(L)
+
 
 # ---------- OTAK AI: Gemini (utama) + Groq (cadangan). Dua-duanya gratis ----------
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
@@ -3207,6 +3257,9 @@ def process_feedback(mem):
             text = (msg.get("text") or "").strip()
             low = text.lower()
             mem["awaiting_text"] = None   # fitur lama nggak dipakai lagi
+            if low in ("/cek", "cek", "/belajar", "progres", "/progres"):
+                tg_message(laporan_belajar(mem))
+                continue
             if low in ("stats", "/stats", "statistik"):
                 a = mem["stats"]["approved"]; r = mem["stats"]["rejected"]; tot = a + r
                 rate = int(100 * a / tot) if tot else 0
